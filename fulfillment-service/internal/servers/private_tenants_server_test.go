@@ -20,7 +20,7 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
-	privatev1 "github.com/osac-project/fulfillment-service/internal/api/osac/private/v1"
+	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 )
 
 var _ = Describe("Private tenants server (Tenant API)", func() {
@@ -513,7 +513,7 @@ var _ = Describe("Private tenants server (Tenant API)", func() {
 				}.Build(),
 				IsDefault:              new(true),
 				ImplementationStrategy: "netris",
-				FabricManager:          "netris",
+				FabricManager:          new("netris"),
 				Spec: privatev1.NetworkClassSpec_builder{
 					Defaults: privatev1.NetworkDefaults_builder{
 						VirtualNetworkIpv4Cidr: "10.0.0.0/16",

@@ -23,9 +23,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
-	privatev1 "github.com/osac-project/fulfillment-service/internal/api/osac/private/v1"
-	"github.com/osac-project/fulfillment-service/internal/auth"
-	"github.com/osac-project/fulfillment-service/internal/database/dao"
+	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
+	"github.com/osac-project/osac/fulfillment-service/internal/auth"
+	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 )
 
 var _ = Describe("Private storage tiers server", func() {
@@ -420,6 +420,9 @@ var _ = Describe("Private storage tiers server", func() {
 			It("Create without name fails", func() {
 				_, err := server.Create(ctx, privatev1.StorageTiersCreateRequest_builder{
 					Object: privatev1.StorageTier_builder{
+						Metadata: privatev1.Metadata_builder{
+							Name: "",
+						}.Build(),
 						Spec: privatev1.StorageTierSpec_builder{
 							Backends: []*privatev1.BackendAssociation{
 								privatev1.BackendAssociation_builder{

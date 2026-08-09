@@ -17,7 +17,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	privatev1 "github.com/osac-project/fulfillment-service/internal/api/osac/private/v1"
+	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 )
 
 var _ = Describe("ApplyClusterSpecDefaults", func() {
@@ -41,13 +41,12 @@ var _ = Describe("ApplyClusterSpecDefaults", func() {
 	It("Applies all defaults to empty spec", func() {
 		pullSecret := "default-pull-secret"
 		sshKey := "ssh-rsa AAAA..."
-		releaseImage := "quay.io/ocp-release:4.17.0"
 		podCidr := "10.128.0.0/14"
 		serviceCidr := "172.30.0.0/16"
 		defaults := privatev1.ClusterTemplateSpecDefaults_builder{
 			PullSecret:   &pullSecret,
 			SshPublicKey: &sshKey,
-			ReleaseImage: &releaseImage,
+			Version:      &privatev1.ClusterVersionReference{Name: "4-22-0"},
 			Network: privatev1.ClusterNetwork_builder{
 				PodCidr:     &podCidr,
 				ServiceCidr: &serviceCidr,
@@ -59,7 +58,7 @@ var _ = Describe("ApplyClusterSpecDefaults", func() {
 
 		Expect(spec.GetPullSecret()).To(Equal("default-pull-secret"))
 		Expect(spec.GetSshPublicKey()).To(Equal("ssh-rsa AAAA..."))
-		Expect(spec.GetReleaseImage()).To(Equal("quay.io/ocp-release:4.17.0"))
+		Expect(spec.GetVersion().GetName()).To(Equal("4-22-0"))
 		Expect(spec.GetNetwork().GetPodCidr()).To(Equal("10.128.0.0/14"))
 		Expect(spec.GetNetwork().GetServiceCidr()).To(Equal("172.30.0.0/16"))
 	})
@@ -72,16 +71,19 @@ var _ = Describe("ApplyClusterSpecDefaults", func() {
 		defaults := privatev1.ClusterTemplateSpecDefaults_builder{
 			PullSecret:   &defaultPullSecret,
 			SshPublicKey: &defaultSshKey,
+			Version:      &privatev1.ClusterVersionReference{Name: "4-22-0"},
 		}.Build()
 
 		spec := privatev1.ClusterSpec_builder{
 			PullSecret:   &userPullSecret,
 			SshPublicKey: &userSshKey,
+			Version:      &privatev1.ClusterVersionReference{Name: "4-22-1"},
 		}.Build()
 		ApplyClusterSpecDefaults(spec, defaults)
 
 		Expect(spec.GetPullSecret()).To(Equal("user-pull-secret"))
 		Expect(spec.GetSshPublicKey()).To(Equal("ssh-ed25519 user-key"))
+		Expect(spec.GetVersion().GetName()).To(Equal("4-22-1"))
 	})
 
 	It("Merges partial network defaults", func() {

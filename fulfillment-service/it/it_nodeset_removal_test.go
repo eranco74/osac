@@ -21,9 +21,9 @@ import (
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
-	privatev1 "github.com/osac-project/fulfillment-service/internal/api/osac/private/v1"
-	publicv1 "github.com/osac-project/fulfillment-service/internal/api/osac/public/v1"
-	"github.com/osac-project/fulfillment-service/internal/uuid"
+	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
+	publicv1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/public/v1"
+	"github.com/osac-project/osac/fulfillment-service/internal/uuid"
 )
 
 var _ = Describe("Node set removal", func() {
@@ -49,6 +49,9 @@ var _ = Describe("Node set removal", func() {
 		_, err := hostTypesClient.Create(ctx, privatev1.HostTypesCreateRequest_builder{
 			Object: privatev1.HostType_builder{
 				Id: workerHostTypeId,
+				Metadata: privatev1.Metadata_builder{
+					Name: fmt.Sprintf("worker-type-%s", uuid.New()),
+				}.Build(),
 			}.Build(),
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
@@ -58,6 +61,9 @@ var _ = Describe("Node set removal", func() {
 		_, err = hostTypesClient.Create(ctx, privatev1.HostTypesCreateRequest_builder{
 			Object: privatev1.HostType_builder{
 				Id: storageHostTypeId,
+				Metadata: privatev1.Metadata_builder{
+					Name: fmt.Sprintf("storage-type-%s", uuid.New()),
+				}.Build(),
 			}.Build(),
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
@@ -66,16 +72,19 @@ var _ = Describe("Node set removal", func() {
 		templateId = fmt.Sprintf("template_2_nodesets_%s", uuid.New())
 		_, err = templatesClient.Create(ctx, privatev1.ClusterTemplatesCreateRequest_builder{
 			Object: privatev1.ClusterTemplate_builder{
-				Id:          templateId,
+				Id: templateId,
+				Metadata: privatev1.Metadata_builder{
+					Name: fmt.Sprintf("template-2-nodesets-%s", uuid.New()),
+				}.Build(),
 				Title:       "Template with 2 node sets",
 				Description: "A template with workers and storage node sets.",
 				NodeSets: map[string]*privatev1.ClusterTemplateNodeSet{
 					"workers": privatev1.ClusterTemplateNodeSet_builder{
-						HostType: workerHostTypeId,
+						HostType: privatev1.HostTypeReference_builder{Id: workerHostTypeId}.Build(),
 						Size:     3,
 					}.Build(),
 					"storage": privatev1.ClusterTemplateNodeSet_builder{
-						HostType: storageHostTypeId,
+						HostType: privatev1.HostTypeReference_builder{Id: storageHostTypeId}.Build(),
 						Size:     2,
 					}.Build(),
 				},
@@ -88,8 +97,11 @@ var _ = Describe("Node set removal", func() {
 		// Step 1: Create cluster with 2 node sets
 		createResponse, err := clustersClient.Create(ctx, publicv1.ClustersCreateRequest_builder{
 			Object: publicv1.Cluster_builder{
+				Metadata: publicv1.Metadata_builder{
+					Name: fmt.Sprintf("nodeset-rm-%s", uuid.New()[24:32]),
+				}.Build(),
 				Spec: publicv1.ClusterSpec_builder{
-					Template: templateId,
+					Template: publicv1.ClusterTemplateReference_builder{Id: templateId}.Build(),
 				}.Build(),
 			}.Build(),
 		}.Build())

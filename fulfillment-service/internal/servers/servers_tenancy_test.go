@@ -19,12 +19,13 @@ import (
 	"go.uber.org/mock/gomock"
 	grpccodes "google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
-	privatev1 "github.com/osac-project/fulfillment-service/internal/api/osac/private/v1"
-	publicv1 "github.com/osac-project/fulfillment-service/internal/api/osac/public/v1"
-	"github.com/osac-project/fulfillment-service/internal/auth"
-	"github.com/osac-project/fulfillment-service/internal/collections"
-	"github.com/osac-project/fulfillment-service/internal/database/dao"
+	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
+	publicv1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/public/v1"
+	"github.com/osac-project/osac/fulfillment-service/internal/auth"
+	"github.com/osac-project/osac/fulfillment-service/internal/collections"
+	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 )
 
 var _ = Describe("Tenancy logic", func() {
@@ -52,25 +53,36 @@ var _ = Describe("Tenancy logic", func() {
 		}
 		createTenant("my-tenant")
 		createTenant("your-tenant")
+
+		// Create a default cluster version for version resolution:
+		seedClusterVersion(ctx, privatev1.ClusterVersion_builder{
+			Id: "cv-default",
+			Metadata: privatev1.Metadata_builder{
+				Name:   "4-17-0",
+				Tenant: auth.SharedTenant,
+			}.Build(),
+			Spec: privatev1.ClusterVersionSpec_builder{
+				Image:     "quay.io/openshift-release-dev/ocp-release:4.17.0-multi",
+				Enabled:   proto.Bool(true),
+				IsDefault: proto.Bool(true),
+				Version:   "4.17.0",
+				State:     privatev1.ClusterVersionState_CLUSTER_VERSION_STATE_ACTIVE,
+			}.Build(),
+		}.Build())
 	})
 
 	It("Returns tenant in metadata when object is created", func() {
 		// Create a mock tenancy logic that returns a specific tenant:
+		assignable := collections.NewSet("my-tenant")
 		tenancy := auth.NewMockTenancyLogic(ctrl)
 		tenancy.EXPECT().DetermineAssignableTenants(gomock.Any()).
-			Return(
-				collections.NewSet("my-tenant"),
-				nil,
-			).
+			Return(assignable, nil).
 			AnyTimes()
 		tenancy.EXPECT().DetermineDefaultTenant(gomock.Any()).
 			Return("my-tenant", nil).
 			AnyTimes()
 		tenancy.EXPECT().DetermineVisibleTenants(gomock.Any()).
-			Return(
-				collections.NewSet("my-tenant"),
-				nil,
-			).
+			Return(auth.SharedTenants.Union(assignable), nil).
 			AnyTimes()
 
 		// Create the template using the DAO directly (this is setup for the test):
@@ -86,6 +98,7 @@ var _ = Describe("Tenancy logic", func() {
 					Title:       "My template",
 					Description: "My template",
 					Metadata: privatev1.Metadata_builder{
+						Name:   "test-template",
 						Tenant: "my-tenant",
 					}.Build(),
 				}.Build(),
@@ -107,8 +120,11 @@ var _ = Describe("Tenancy logic", func() {
 			ctx,
 			publicv1.ClustersCreateRequest_builder{
 				Object: publicv1.Cluster_builder{
+					Metadata: publicv1.Metadata_builder{
+						Name: "test-cluster",
+					}.Build(),
 					Spec: publicv1.ClusterSpec_builder{
-						Template: "my-template",
+						Template: publicv1.ClusterTemplateReference_builder{Id: "my-template"}.Build(),
 					}.Build(),
 				}.Build(),
 			}.Build(),
@@ -138,6 +154,7 @@ var _ = Describe("Tenancy logic", func() {
 				Title:       "My template",
 				Description: "My template",
 				Metadata: privatev1.Metadata_builder{
+					Name:   "test-template",
 					Tenant: "my-tenant",
 				}.Build(),
 			}.Build(),
@@ -154,7 +171,7 @@ var _ = Describe("Tenancy logic", func() {
 			Return("my-tenant", nil).
 			AnyTimes()
 		tenancy.EXPECT().DetermineVisibleTenants(gomock.Any()).
-			Return(collections.NewSet("my-tenant"), nil).
+			Return(auth.SharedTenants.Union(collections.NewSet("my-tenant")), nil).
 			AnyTimes()
 
 		// Create the clusters server with the empty tenancy logic:
@@ -169,8 +186,11 @@ var _ = Describe("Tenancy logic", func() {
 		// Attempt to create a cluster and verify it fails:
 		response, err := clustersServer.Create(ctx, publicv1.ClustersCreateRequest_builder{
 			Object: publicv1.Cluster_builder{
+				Metadata: publicv1.Metadata_builder{
+					Name: "test-cluster",
+				}.Build(),
 				Spec: publicv1.ClusterSpec_builder{
-					Template: "my-template",
+					Template: publicv1.ClusterTemplateReference_builder{Id: "my-template"}.Build(),
 				}.Build(),
 			}.Build(),
 		}.Build())
@@ -184,15 +204,16 @@ var _ = Describe("Tenancy logic", func() {
 
 	It("Uses default tenant when tenant is explicitly empty", func() {
 		// Create a tenancy logic that returns a valid tenant:
+		assignable := collections.NewSet("my-tenant")
 		tenancy := auth.NewMockTenancyLogic(ctrl)
 		tenancy.EXPECT().DetermineAssignableTenants(gomock.Any()).
-			Return(collections.NewSet("my-tenant"), nil).
+			Return(assignable, nil).
 			AnyTimes()
 		tenancy.EXPECT().DetermineDefaultTenant(gomock.Any()).
 			Return("my-tenant", nil).
 			AnyTimes()
 		tenancy.EXPECT().DetermineVisibleTenants(gomock.Any()).
-			Return(collections.NewSet("my-tenant"), nil).
+			Return(auth.SharedTenants.Union(assignable), nil).
 			AnyTimes()
 
 		// Create the template using the DAO:
@@ -208,6 +229,7 @@ var _ = Describe("Tenancy logic", func() {
 					Title:       "My template",
 					Description: "My template",
 					Metadata: privatev1.Metadata_builder{
+						Name:   "test-template",
 						Tenant: "my-tenant",
 					}.Build(),
 				}.Build(),
@@ -228,10 +250,11 @@ var _ = Describe("Tenancy logic", func() {
 		response, err := clustersServer.Create(ctx, publicv1.ClustersCreateRequest_builder{
 			Object: publicv1.Cluster_builder{
 				Metadata: publicv1.Metadata_builder{
+					Name:   "test-cluster",
 					Tenant: "",
 				}.Build(),
 				Spec: publicv1.ClusterSpec_builder{
-					Template: "my-template",
+					Template: publicv1.ClusterTemplateReference_builder{Id: "my-template"}.Build(),
 				}.Build(),
 			}.Build(),
 		}.Build())
@@ -246,15 +269,16 @@ var _ = Describe("Tenancy logic", func() {
 
 	It("Respects explicitly specified tenant over default", func() {
 		// Create a tenancy logic where the default tenant differs from the one the user will specify:
+		assignable := collections.NewSet("my-tenant", "your-tenant")
 		tenancy := auth.NewMockTenancyLogic(ctrl)
 		tenancy.EXPECT().DetermineAssignableTenants(gomock.Any()).
-			Return(collections.NewSet("my-tenant", "your-tenant"), nil).
+			Return(assignable, nil).
 			AnyTimes()
 		tenancy.EXPECT().DetermineDefaultTenant(gomock.Any()).
 			Return("your-tenant", nil).
 			AnyTimes()
 		tenancy.EXPECT().DetermineVisibleTenants(gomock.Any()).
-			Return(collections.NewSet("my-tenant", "your-tenant"), nil).
+			Return(auth.SharedTenants.Union(assignable), nil).
 			AnyTimes()
 
 		// Create the template using the DAO:
@@ -269,6 +293,7 @@ var _ = Describe("Tenancy logic", func() {
 				Title:       "My template",
 				Description: "My template",
 				Metadata: privatev1.Metadata_builder{
+					Name:   "test-template",
 					Tenant: "my-tenant",
 				}.Build(),
 			}.Build()).
@@ -288,10 +313,11 @@ var _ = Describe("Tenancy logic", func() {
 		response, err := clustersServer.Create(ctx, publicv1.ClustersCreateRequest_builder{
 			Object: publicv1.Cluster_builder{
 				Metadata: publicv1.Metadata_builder{
+					Name:   "test-cluster",
 					Tenant: "my-tenant",
 				}.Build(),
 				Spec: publicv1.ClusterSpec_builder{
-					Template: "my-template",
+					Template: publicv1.ClusterTemplateReference_builder{Id: "my-template"}.Build(),
 				}.Build(),
 			}.Build(),
 		}.Build())
@@ -305,15 +331,16 @@ var _ = Describe("Tenancy logic", func() {
 	})
 
 	It("Rejects changing tenant on update", func() {
+		assignable := collections.NewSet("my-tenant", "your-tenant")
 		tenancy := auth.NewMockTenancyLogic(ctrl)
 		tenancy.EXPECT().DetermineAssignableTenants(gomock.Any()).
-			Return(collections.NewSet("my-tenant", "your-tenant"), nil).
+			Return(assignable, nil).
 			AnyTimes()
 		tenancy.EXPECT().DetermineDefaultTenant(gomock.Any()).
 			Return("my-tenant", nil).
 			AnyTimes()
 		tenancy.EXPECT().DetermineVisibleTenants(gomock.Any()).
-			Return(collections.NewSet("my-tenant", "your-tenant"), nil).
+			Return(auth.SharedTenants.Union(assignable), nil).
 			AnyTimes()
 
 		templatesDao, err := dao.NewGenericDAO[*privatev1.ClusterTemplate]().
@@ -327,6 +354,7 @@ var _ = Describe("Tenancy logic", func() {
 				Title:       "My template",
 				Description: "My template",
 				Metadata: privatev1.Metadata_builder{
+					Name:   "test-template",
 					Tenant: "my-tenant",
 				}.Build(),
 			}.Build()).
@@ -343,8 +371,11 @@ var _ = Describe("Tenancy logic", func() {
 
 		createResponse, err := clustersServer.Create(ctx, publicv1.ClustersCreateRequest_builder{
 			Object: publicv1.Cluster_builder{
+				Metadata: publicv1.Metadata_builder{
+					Name: "test-cluster",
+				}.Build(),
 				Spec: publicv1.ClusterSpec_builder{
-					Template: "my-template",
+					Template: publicv1.ClusterTemplateReference_builder{Id: "my-template"}.Build(),
 				}.Build(),
 			}.Build(),
 		}.Build())
@@ -355,6 +386,7 @@ var _ = Describe("Tenancy logic", func() {
 			Object: publicv1.Cluster_builder{
 				Id: object.GetId(),
 				Metadata: publicv1.Metadata_builder{
+					Name:   "test-cluster",
 					Tenant: "your-tenant",
 				}.Build(),
 			}.Build(),
@@ -367,15 +399,16 @@ var _ = Describe("Tenancy logic", func() {
 	})
 
 	It("Preserves tenant when update does not specify it", func() {
+		assignable := collections.NewSet("my-tenant")
 		tenancy := auth.NewMockTenancyLogic(ctrl)
 		tenancy.EXPECT().DetermineAssignableTenants(gomock.Any()).
-			Return(collections.NewSet("my-tenant"), nil).
+			Return(assignable, nil).
 			AnyTimes()
 		tenancy.EXPECT().DetermineDefaultTenant(gomock.Any()).
 			Return("my-tenant", nil).
 			AnyTimes()
 		tenancy.EXPECT().DetermineVisibleTenants(gomock.Any()).
-			Return(collections.NewSet("my-tenant"), nil).
+			Return(auth.SharedTenants.Union(assignable), nil).
 			AnyTimes()
 
 		templatesDao, err := dao.NewGenericDAO[*privatev1.ClusterTemplate]().
@@ -389,6 +422,7 @@ var _ = Describe("Tenancy logic", func() {
 				Title:       "My template",
 				Description: "My template",
 				Metadata: privatev1.Metadata_builder{
+					Name:   "test-template",
 					Tenant: "my-tenant",
 				}.Build(),
 			}.Build()).
@@ -405,8 +439,11 @@ var _ = Describe("Tenancy logic", func() {
 
 		createResponse, err := clustersServer.Create(ctx, publicv1.ClustersCreateRequest_builder{
 			Object: publicv1.Cluster_builder{
+				Metadata: publicv1.Metadata_builder{
+					Name: "test-cluster",
+				}.Build(),
 				Spec: publicv1.ClusterSpec_builder{
-					Template: "my-template",
+					Template: publicv1.ClusterTemplateReference_builder{Id: "my-template"}.Build(),
 				}.Build(),
 			}.Build(),
 		}.Build())
@@ -419,7 +456,7 @@ var _ = Describe("Tenancy logic", func() {
 				Spec: publicv1.ClusterSpec_builder{
 					NodeSets: map[string]*publicv1.ClusterNodeSet{
 						"compute": publicv1.ClusterNodeSet_builder{
-							HostType: "acme_1tib",
+							HostType: publicv1.HostTypeReference_builder{Id: "acme_1tib"}.Build(),
 							Size:     4,
 						}.Build(),
 					},
@@ -432,16 +469,16 @@ var _ = Describe("Tenancy logic", func() {
 
 	It("Rejects object creation when assigned tenant is invisible to the user", func() {
 		// Create a tenancy logic that returns visible tenants:
-		visible := collections.NewSet("my-tenant")
+		assignable := collections.NewSet("my-tenant")
 		tenancy := auth.NewMockTenancyLogic(ctrl)
 		tenancy.EXPECT().DetermineAssignableTenants(gomock.Any()).
-			Return(visible, nil).
+			Return(assignable, nil).
 			AnyTimes()
 		tenancy.EXPECT().DetermineDefaultTenant(gomock.Any()).
 			Return("my-tenant", nil).
 			AnyTimes()
 		tenancy.EXPECT().DetermineVisibleTenants(gomock.Any()).
-			Return(visible, nil).
+			Return(auth.SharedTenants.Union(assignable), nil).
 			AnyTimes()
 
 		// Create the template:
@@ -454,6 +491,7 @@ var _ = Describe("Tenancy logic", func() {
 			SetObject(privatev1.ClusterTemplate_builder{
 				Id: "our-template",
 				Metadata: privatev1.Metadata_builder{
+					Name:   "test-template",
 					Tenant: "my-tenant",
 				}.Build(),
 			}.Build(),
@@ -473,10 +511,11 @@ var _ = Describe("Tenancy logic", func() {
 		response, err := clustersServer.Create(ctx, publicv1.ClustersCreateRequest_builder{
 			Object: publicv1.Cluster_builder{
 				Metadata: publicv1.Metadata_builder{
+					Name:   "test-cluster",
 					Tenant: "your-tenant",
 				}.Build(),
 				Spec: publicv1.ClusterSpec_builder{
-					Template: "our-template",
+					Template: publicv1.ClusterTemplateReference_builder{Id: "our-template"}.Build(),
 				}.Build(),
 			}.Build(),
 		}.Build())
@@ -523,6 +562,7 @@ var _ = Describe("Tenancy logic", func() {
 					Title:       "My template",
 					Description: "My template",
 					Metadata: privatev1.Metadata_builder{
+						Name:   "test-template",
 						Tenant: "my-tenant",
 					}.Build(),
 				}.Build(),
@@ -538,7 +578,7 @@ var _ = Describe("Tenancy logic", func() {
 					Tenant: "does-not-exist",
 				}.Build(),
 				Spec: publicv1.ClusterSpec_builder{
-					Template: "my-template",
+					Template: publicv1.ClusterTemplateReference_builder{Id: "my-template"}.Build(),
 				}.Build(),
 			}.Build(),
 		}.Build())

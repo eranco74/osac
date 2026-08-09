@@ -26,11 +26,11 @@ import (
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	privatev1 "github.com/osac-project/fulfillment-service/internal/api/osac/private/v1"
-	publicv1 "github.com/osac-project/fulfillment-service/internal/api/osac/public/v1"
-	"github.com/osac-project/fulfillment-service/internal/kubernetes/labels"
-	"github.com/osac-project/fulfillment-service/internal/uuid"
-	osacv1alpha1 "github.com/osac-project/osac-operator/api/v1alpha1"
+	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
+	publicv1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/public/v1"
+	"github.com/osac-project/osac/fulfillment-service/internal/kubernetes/labels"
+	"github.com/osac-project/osac/fulfillment-service/internal/uuid"
+	osacv1alpha1 "github.com/osac-project/osac/osac-operator/api/v1alpha1"
 )
 
 var _ = Describe("Cluster reconciler", func() {
@@ -63,6 +63,9 @@ var _ = Describe("Cluster reconciler", func() {
 		_, err := hostTypesClient.Create(ctx, privatev1.HostTypesCreateRequest_builder{
 			Object: privatev1.HostType_builder{
 				Id: hostTypeId,
+				Metadata: privatev1.Metadata_builder{
+					Name: fmt.Sprintf("test-ht-%s", uuid.New()[24:32]),
+				}.Build(),
 			}.Build(),
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
@@ -74,6 +77,9 @@ var _ = Describe("Cluster reconciler", func() {
 				Id:          templateId,
 				Title:       "My template %s",
 				Description: "My template.",
+				Metadata: privatev1.Metadata_builder{
+					Name: fmt.Sprintf("test-tmpl-%s", uuid.New()[24:32]),
+				}.Build(),
 				Parameters: []*privatev1.ClusterTemplateParameterDefinition{
 					privatev1.ClusterTemplateParameterDefinition_builder{
 						Name:        "my",
@@ -93,7 +99,7 @@ var _ = Describe("Cluster reconciler", func() {
 				},
 				NodeSets: map[string]*privatev1.ClusterTemplateNodeSet{
 					"my_node_set": privatev1.ClusterTemplateNodeSet_builder{
-						HostType: hostTypeId,
+						HostType: privatev1.HostTypeReference_builder{Id: hostTypeId}.Build(),
 						Size:     3,
 					}.Build(),
 				},
@@ -112,8 +118,11 @@ var _ = Describe("Cluster reconciler", func() {
 		// Create the cluster
 		response, err := clustersClient.Create(ctx, publicv1.ClustersCreateRequest_builder{
 			Object: publicv1.Cluster_builder{
+				Metadata: publicv1.Metadata_builder{
+					Name: fmt.Sprintf("test-cluster-%s", uuid.New()[24:32]),
+				}.Build(),
 				Spec: publicv1.ClusterSpec_builder{
-					Template: templateId,
+					Template: publicv1.ClusterTemplateReference_builder{Id: templateId}.Build(),
 					TemplateParameters: map[string]*anypb.Any{
 						"my": makeAny(wrapperspb.String("my_value")),
 					},
@@ -165,8 +174,11 @@ var _ = Describe("Cluster reconciler", func() {
 		// Create the cluster
 		createResponse, err := clustersClient.Create(ctx, publicv1.ClustersCreateRequest_builder{
 			Object: publicv1.Cluster_builder{
+				Metadata: publicv1.Metadata_builder{
+					Name: fmt.Sprintf("test-cluster-%s", uuid.New()[24:32]),
+				}.Build(),
 				Spec: publicv1.ClusterSpec_builder{
-					Template: templateId,
+					Template: publicv1.ClusterTemplateReference_builder{Id: templateId}.Build(),
 					TemplateParameters: map[string]*anypb.Any{
 						"my": makeAny(wrapperspb.String("my_value")),
 					},
@@ -222,14 +234,17 @@ var _ = Describe("Cluster reconciler", func() {
 		// Create the cluster with initial node set size:
 		createResponse, err := clustersClient.Create(ctx, publicv1.ClustersCreateRequest_builder{
 			Object: publicv1.Cluster_builder{
+				Metadata: publicv1.Metadata_builder{
+					Name: fmt.Sprintf("test-cluster-%s", uuid.New()[24:32]),
+				}.Build(),
 				Spec: publicv1.ClusterSpec_builder{
-					Template: templateId,
+					Template: publicv1.ClusterTemplateReference_builder{Id: templateId}.Build(),
 					TemplateParameters: map[string]*anypb.Any{
 						"my": makeAny(wrapperspb.String("my_value")),
 					},
 					NodeSets: map[string]*publicv1.ClusterNodeSet{
 						"my_node_set": publicv1.ClusterNodeSet_builder{
-							HostType: hostTypeId,
+							HostType: publicv1.HostTypeReference_builder{Id: hostTypeId}.Build(),
 							Size:     3,
 						}.Build(),
 					},
@@ -271,14 +286,17 @@ var _ = Describe("Cluster reconciler", func() {
 		_, err = clustersClient.Update(ctx, publicv1.ClustersUpdateRequest_builder{
 			Object: publicv1.Cluster_builder{
 				Id: object.GetId(),
+				Metadata: publicv1.Metadata_builder{
+					Name: object.GetMetadata().GetName(),
+				}.Build(),
 				Spec: publicv1.ClusterSpec_builder{
-					Template: templateId,
+					Template: publicv1.ClusterTemplateReference_builder{Id: templateId}.Build(),
 					TemplateParameters: map[string]*anypb.Any{
 						"my": makeAny(wrapperspb.String("my_value")),
 					},
 					NodeSets: map[string]*publicv1.ClusterNodeSet{
 						"my_node_set": publicv1.ClusterNodeSet_builder{
-							HostType: hostTypeId,
+							HostType: publicv1.HostTypeReference_builder{Id: hostTypeId}.Build(),
 							Size:     5,
 						}.Build(),
 					},

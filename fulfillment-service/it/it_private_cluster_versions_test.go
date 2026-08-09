@@ -24,7 +24,8 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
-	privatev1 "github.com/osac-project/fulfillment-service/internal/api/osac/private/v1"
+	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
+	"github.com/osac-project/osac/fulfillment-service/internal/uuid"
 )
 
 var cvVersionCounter atomic.Int64
@@ -47,6 +48,9 @@ var _ = Describe("Private cluster versions", func() {
 	createCV := func(version string) *privatev1.ClusterVersion {
 		response, err := client.Create(ctx, privatev1.ClusterVersionsCreateRequest_builder{
 			Object: privatev1.ClusterVersion_builder{
+				Metadata: privatev1.Metadata_builder{
+					Name: fmt.Sprintf("test-cv-%s", uuid.New()[24:32]),
+				}.Build(),
 				Spec: privatev1.ClusterVersionSpec_builder{
 					Version: version,
 					Image:   fmt.Sprintf("quay.io/openshift-release-dev/ocp-release:%s", version),

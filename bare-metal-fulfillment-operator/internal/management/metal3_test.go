@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/osac-project/bare-metal-fulfillment-operator/internal/management"
+	"github.com/osac-project/osac/bare-metal-fulfillment-operator/internal/management"
 )
 
 const (
@@ -258,6 +258,15 @@ var _ = Describe("Metal3 Management Backend", func() {
 			complete, err := m.IsRestartComplete(ctx, metal3TestNamespace+"/host-1")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(complete).To(BeTrue())
+		})
+
+		It("returns false when annotation is gone but host is not powered on", func() {
+			bmh := newBMHForManagement("host-rebooting", true, false)
+			m := newMetal3ManagementClient(bmh)
+
+			complete, err := m.IsRestartComplete(ctx, metal3TestNamespace+"/host-rebooting")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(complete).To(BeFalse())
 		})
 
 		It("returns false when reboot annotation is present", func() {

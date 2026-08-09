@@ -24,7 +24,7 @@ import (
 	"math/rand/v2"
 	"slices"
 
-	"github.com/osac-project/fulfillment-service/internal/computeinstancespec"
+	"github.com/osac-project/osac/fulfillment-service/internal/computeinstancespec"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -33,15 +33,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clnt "sigs.k8s.io/controller-runtime/pkg/client"
 
-	osacv1alpha1 "github.com/osac-project/osac-operator/api/v1alpha1"
+	osacv1alpha1 "github.com/osac-project/osac/osac-operator/api/v1alpha1"
 
-	privatev1 "github.com/osac-project/fulfillment-service/internal/api/osac/private/v1"
-	"github.com/osac-project/fulfillment-service/internal/controllers"
-	"github.com/osac-project/fulfillment-service/internal/controllers/finalizers"
-	"github.com/osac-project/fulfillment-service/internal/kubernetes/annotations"
-	"github.com/osac-project/fulfillment-service/internal/kubernetes/labels"
-	"github.com/osac-project/fulfillment-service/internal/masks"
-	"github.com/osac-project/fulfillment-service/internal/utils"
+	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
+	"github.com/osac-project/osac/fulfillment-service/internal/controllers"
+	"github.com/osac-project/osac/fulfillment-service/internal/controllers/finalizers"
+	"github.com/osac-project/osac/fulfillment-service/internal/kubernetes/annotations"
+	"github.com/osac-project/osac/fulfillment-service/internal/kubernetes/labels"
+	"github.com/osac-project/osac/fulfillment-service/internal/masks"
+	"github.com/osac-project/osac/fulfillment-service/internal/utils"
 )
 
 // objectPrefix is the prefix that will be used in the `generateName` field of the resources created in the hub.
@@ -52,6 +52,12 @@ const userDataSecretSuffix = "-user-data"
 
 // userDataSecretKey is the key used in the Secret's stringData to store the cloud-init user data.
 const userDataSecretKey = "userdata"
+
+// errTransientK8sError marks errors from Kubernetes Create/Patch calls that are not permanent
+// validation failures. Reconciliation errors are normally recorded as a FAILED state via
+// setReconciliationFailed, but transient errors should just be retried, leaving the compute
+// instance's state untouched so it doesn't look like a permanent failure while it is retried.
+var errTransientK8sError = errors.New("transient kubernetes error")
 
 // FunctionBuilder contains the data and logic needed to build a function that reconciles compute instances.
 type FunctionBuilder struct {
@@ -142,7 +148,7 @@ func (r *function) run(ctx context.Context, computeInstance *privatev1.ComputeIn
 	} else {
 		reconcileErr = t.update(ctx)
 	}
-	if reconcileErr != nil {
+	if reconcileErr != nil && !errors.Is(reconcileErr, errTransientK8sError) {
 		t.setReconciliationFailed(reconcileErr)
 	}
 	// Calculate which fields the reconciler actually modified and use a field mask
@@ -150,12 +156,21 @@ func (r *function) run(ctx context.Context, computeInstance *privatev1.ComputeIn
 	updateMask := r.maskCalculator.Calculate(oldComputeInstance, computeInstance)
 
 	// Only send an update if there are actual changes
-	_, updateErr := r.computeInstancesClient.Update(ctx, privatev1.ComputeInstancesUpdateRequest_builder{
-		Object:     computeInstance,
-		UpdateMask: updateMask,
-	}.Build())
+	var updateErr error
+	if len(updateMask.GetPaths()) > 0 {
+		_, updateErr = r.computeInstancesClient.Update(ctx, privatev1.ComputeInstancesUpdateRequest_builder{
+			Object:     computeInstance,
+			UpdateMask: updateMask,
+		}.Build())
+	}
 
 	if reconcileErr != nil {
+		if updateErr != nil {
+			r.logger.WarnContext(ctx, "Failed to persist status after reconciliation error",
+				slog.String("reconcile_error", reconcileErr.Error()),
+				slog.String("update_error", updateErr.Error()),
+			)
+		}
 		return reconcileErr
 	}
 	return updateErr
@@ -209,8 +224,8 @@ func (t *task) update(ctx context.Context) error {
 		objectLabels := map[string]string{
 			labels.ComputeInstanceUuid: t.computeInstance.GetId(),
 		}
-		if instanceTypeName := t.computeInstance.GetSpec().GetInstanceType(); instanceTypeName != "" {
-			objectLabels[labels.InstanceTypeName] = instanceTypeName
+		if instanceTypeName := t.computeInstance.GetSpec().GetInstanceType(); instanceTypeName != nil {
+			objectLabels[labels.InstanceTypeName] = instanceTypeName.GetName()
 		}
 		object = &osacv1alpha1.ComputeInstance{
 			ObjectMeta: metav1.ObjectMeta{
@@ -225,7 +240,10 @@ func (t *task) update(ctx context.Context) error {
 		}
 		err = t.hubClient.Create(ctx, object)
 		if err != nil {
-			return err
+			if err := controllers.HandleK8sWriteError(ctx, t.r.logger, err, t.setFailed); err != nil {
+				return fmt.Errorf("%w: %w", errTransientK8sError, err)
+			}
+			return nil
 		}
 		t.r.logger.DebugContext(
 			ctx,
@@ -238,7 +256,10 @@ func (t *task) update(ctx context.Context) error {
 		update.Spec = spec
 		err = t.hubClient.Patch(ctx, update, clnt.MergeFrom(object))
 		if err != nil {
-			return err
+			if err := controllers.HandleK8sWriteError(ctx, t.r.logger, err, t.setFailed); err != nil {
+				return fmt.Errorf("%w: %w", errTransientK8sError, err)
+			}
+			return nil
 		}
 		t.r.logger.DebugContext(
 			ctx,
@@ -501,6 +522,19 @@ func (t *task) removeFinalizer() {
 	}
 }
 
+func (t *task) setFailed(err error) {
+	if !t.computeInstance.HasStatus() {
+		t.computeInstance.SetStatus(&privatev1.ComputeInstanceStatus{})
+	}
+	t.computeInstance.GetStatus().SetState(privatev1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_FAILED)
+	t.updateCondition(
+		privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_CONFIGURATION_APPLIED,
+		privatev1.ConditionStatus_CONDITION_STATUS_FALSE,
+		"ValidationFailed",
+		err.Error(),
+	)
+}
+
 // updateCondition updates or creates a condition with the specified type, status, reason, and message.
 func (t *task) updateCondition(conditionType privatev1.ComputeInstanceConditionType, status privatev1.ConditionStatus,
 	reason string, message string) {
@@ -554,7 +588,7 @@ func (t *task) buildSpec(ctx context.Context) (osacv1alpha1.ComputeInstanceSpec,
 		return osacv1alpha1.ComputeInstanceSpec{}, err
 	}
 	spec := osacv1alpha1.ComputeInstanceSpec{
-		TemplateID:         t.computeInstance.GetSpec().GetTemplate(),
+		TemplateID:         controllers.RefKeyStr(t.computeInstance.GetSpec().GetTemplate()),
 		TemplateParameters: templateParameters,
 	}
 
@@ -594,7 +628,7 @@ func (t *task) buildSpecNetworkAttachments(ctx context.Context, spec *osacv1alph
 		subnetID := att.GetSubnet()
 		// subnetID is guaranteed to be non-empty by ValidateNetworkAttachments
 
-		subnetCR, err := t.getSubnetCR(ctx, subnetID)
+		subnetCR, err := t.getSubnetCR(ctx, subnetID.GetId())
 		if err != nil {
 			return fmt.Errorf(
 				"failed to look up Subnet CR for network_attachments[%d] subnet %s: %w",
@@ -609,16 +643,16 @@ func (t *task) buildSpecNetworkAttachments(ctx context.Context, spec *osacv1alph
 		t.r.logger.DebugContext(
 			ctx,
 			"Resolved subnetRef from Subnet CR",
-			slog.String("subnet_id", subnetID),
+			slog.String("subnet_id", subnetID.GetId()),
 			slog.String("subnet_ref", subnetRef),
 		)
 
 		sgRefs := make([]string, 0, len(att.GetSecurityGroups()))
 		for _, sgID := range att.GetSecurityGroups() {
-			if sgID == "" {
+			if sgID == nil {
 				continue
 			}
-			sgCR, sgErr := t.getSecurityGroupCR(ctx, sgID)
+			sgCR, sgErr := t.getSecurityGroupCR(ctx, sgID.GetId())
 			if sgErr != nil {
 				return fmt.Errorf(
 					"failed to look up SecurityGroup CR for network_attachments[%d] security group %s: %w",
@@ -633,7 +667,7 @@ func (t *task) buildSpecNetworkAttachments(ctx context.Context, spec *osacv1alph
 			t.r.logger.DebugContext(
 				ctx,
 				"Resolved securityGroupRef from SecurityGroup CR",
-				slog.String("security_group_id", sgID),
+				slog.String("security_group_id", sgID.GetId()),
 				slog.String("security_group_ref", sgCR.GetName()),
 			)
 		}
@@ -654,18 +688,19 @@ func (t *task) buildSpecNetworkAttachments(ctx context.Context, spec *osacv1alph
 func (t *task) addExplicitFields(ctx context.Context, spec *osacv1alpha1.ComputeInstanceSpec) error {
 	ciSpec := t.computeInstance.GetSpec()
 
-	instanceTypeName := ciSpec.GetInstanceType()
-	if instanceTypeName == "" {
+	instanceTypeRef := ciSpec.GetInstanceType()
+	if instanceTypeRef == nil {
 		return fmt.Errorf(
 			"compute instance '%s' has no instance_type set; cannot resolve compute resources",
 			t.computeInstance.GetId(),
 		)
 	}
+	instanceTypeKey := controllers.RefKeyStr(instanceTypeRef)
 	response, err := t.r.instanceTypesClient.Get(ctx, privatev1.InstanceTypesGetRequest_builder{
-		Id: instanceTypeName,
+		Id: instanceTypeKey,
 	}.Build())
 	if err != nil {
-		return fmt.Errorf("failed to resolve instance type '%s': %w", instanceTypeName, err)
+		return fmt.Errorf("failed to resolve instance type '%s': %w", instanceTypeKey, err)
 	}
 	itSpec := response.GetObject().GetSpec()
 	spec.Cores = itSpec.GetCores()

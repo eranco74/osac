@@ -16,7 +16,7 @@ package utils
 import (
 	"google.golang.org/protobuf/proto"
 
-	privatev1 "github.com/osac-project/fulfillment-service/internal/api/osac/private/v1"
+	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 )
 
 // ApplyClusterSpecDefaults applies default values from a template's spec_defaults to a cluster spec.
@@ -32,8 +32,8 @@ func ApplyClusterSpecDefaults(spec *privatev1.ClusterSpec, defaults *privatev1.C
 	if !spec.HasSshPublicKey() && defaults.HasSshPublicKey() {
 		spec.SetSshPublicKey(defaults.GetSshPublicKey())
 	}
-	if !spec.HasReleaseImage() && defaults.HasReleaseImage() {
-		spec.SetReleaseImage(defaults.GetReleaseImage())
+	if spec.GetVersion() == nil && defaults.GetVersion() != nil {
+		spec.SetVersion(proto.Clone(defaults.GetVersion()).(*privatev1.ClusterVersionReference))
 	}
 	mergeClusterNetworkDefaults(spec, defaults)
 }

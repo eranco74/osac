@@ -37,23 +37,24 @@ import (
 	"k8s.io/klog/v2"
 	crlog "sigs.k8s.io/controller-runtime/pkg/log"
 
-	privatev1 "github.com/osac-project/fulfillment-service/internal/api/osac/private/v1"
-	publicv1 "github.com/osac-project/fulfillment-service/internal/api/osac/public/v1"
-	"github.com/osac-project/fulfillment-service/internal/auth"
-	"github.com/osac-project/fulfillment-service/internal/auth/jwe"
-	"github.com/osac-project/fulfillment-service/internal/console"
-	"github.com/osac-project/fulfillment-service/internal/database"
-	"github.com/osac-project/fulfillment-service/internal/database/dao"
-	hubscheme "github.com/osac-project/fulfillment-service/internal/kubernetes/scheme"
-	"github.com/osac-project/fulfillment-service/internal/logging"
-	"github.com/osac-project/fulfillment-service/internal/metrics"
-	"github.com/osac-project/fulfillment-service/internal/network"
-	"github.com/osac-project/fulfillment-service/internal/provisioners"
-	"github.com/osac-project/fulfillment-service/internal/recovery"
-	"github.com/osac-project/fulfillment-service/internal/references"
-	"github.com/osac-project/fulfillment-service/internal/servers"
-	shtdwn "github.com/osac-project/fulfillment-service/internal/shutdown"
-	"github.com/osac-project/fulfillment-service/internal/validation"
+	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
+	publicv1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/public/v1"
+	"github.com/osac-project/osac/fulfillment-service/internal/auth"
+	"github.com/osac-project/osac/fulfillment-service/internal/auth/jwe"
+	"github.com/osac-project/osac/fulfillment-service/internal/console"
+	"github.com/osac-project/osac/fulfillment-service/internal/database"
+	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
+	hubscheme "github.com/osac-project/osac/fulfillment-service/internal/kubernetes/scheme"
+	"github.com/osac-project/osac/fulfillment-service/internal/logging"
+	"github.com/osac-project/osac/fulfillment-service/internal/metrics"
+	"github.com/osac-project/osac/fulfillment-service/internal/network"
+	"github.com/osac-project/osac/fulfillment-service/internal/provisioners"
+	"github.com/osac-project/osac/fulfillment-service/internal/recovery"
+	"github.com/osac-project/osac/fulfillment-service/internal/references"
+	"github.com/osac-project/osac/fulfillment-service/internal/servers"
+	shtdwn "github.com/osac-project/osac/fulfillment-service/internal/shutdown"
+	"github.com/osac-project/osac/fulfillment-service/internal/validation"
+	"github.com/osac-project/osac/fulfillment-service/internal/vault"
 )
 
 // userIDResolver implements auth.UserIDResolver by querying the users DAO.
@@ -182,6 +183,24 @@ func Cmd() *cobra.Command {
 		},
 		emergencyServiceAccountsFlagHelp,
 	)
+	flags.StringVar(
+		&runner.args.vaultEndpoint,
+		"vault-endpoint",
+		"",
+		vaultEndpointFlagHelp,
+	)
+	flags.StringVar(
+		&runner.args.vaultNamespace,
+		"vault-namespace",
+		"osac",
+		vaultNamespaceFlagHelp,
+	)
+	flags.StringVar(
+		&runner.args.vaultKVMountPath,
+		"vault-kv-mount-path",
+		"secret",
+		vaultKVMountPathFlagHelp,
+	)
 	network.AddGrpcKeepaliveFlags(flags)
 	return command
 }
@@ -201,6 +220,9 @@ type runnerContext struct {
 		tokenEncryptionCrt       string
 		tokenIssuer              string
 		emergencyServiceAccounts []string
+		vaultEndpoint            string
+		vaultNamespace           string
+		vaultKVMountPath         string
 	}
 }
 
@@ -439,6 +461,13 @@ func (c *runnerContext) run(cmd *cobra.Command, argv []string) error { //nolint:
 		Build()
 	if err != nil {
 		return fmt.Errorf("failed to create reference validation interceptor: %w", err)
+	}
+
+	// Register reference lookup functions for all resource types:
+	c.logger.InfoContext(ctx, "Registering reference lookup functions")
+	err = registerReferenceLookups(referenceValidator, c.logger, tenancyLogic, metricsRegisterer)
+	if err != nil {
+		return fmt.Errorf("failed to register reference lookups: %w", err)
 	}
 
 	// Prepare the transactions manager:
@@ -1014,6 +1043,20 @@ func (c *runnerContext) run(cmd *cobra.Command, argv []string) error { //nolint:
 	}
 	privatev1.RegisterInstanceTypesServer(grpcServer, privateInstanceTypesServer)
 
+	// Create the bare metal instance types server:
+	c.logger.InfoContext(ctx, "Creating bare metal instance types server")
+	bareMetalInstanceTypesServer, err := servers.NewBareMetalInstanceTypesServer().
+		SetLogger(c.logger).
+		SetNotifier(notifier).
+		SetAttributionLogic(publicAttributionLogic).
+		SetTenancyLogic(tenancyLogic).
+		SetMetricsRegisterer(metricsRegisterer).
+		Build()
+	if err != nil {
+		return fmt.Errorf("failed to create bare metal instance types server: %w", err)
+	}
+	publicv1.RegisterBareMetalInstanceTypesServer(grpcServer, bareMetalInstanceTypesServer)
+
 	// Create the private bare metal instance types server:
 	c.logger.InfoContext(ctx, "Creating private bare metal instance types server")
 	privateBareMetalInstanceTypesServer, err := servers.NewPrivateBareMetalInstanceTypesServer().
@@ -1069,6 +1112,25 @@ func (c *runnerContext) run(cmd *cobra.Command, argv []string) error { //nolint:
 		return fmt.Errorf("failed to create private storage backends server: %w", err)
 	}
 	privatev1.RegisterStorageBackendsServer(grpcServer, privateStorageBackendsServer)
+
+	// Perform vault health check if configured:
+	if c.args.vaultEndpoint != "" {
+		c.logger.InfoContext(ctx, "Performing vault health check")
+		healthChecker, healthErr := vault.NewHealthChecker().
+			SetLogger(c.logger).
+			SetAddress(c.args.vaultEndpoint).
+			SetCaPool(caPool).
+			Build()
+		if healthErr != nil {
+			c.logger.ErrorContext(ctx, "Failed to create Vault health checker",
+				slog.String("error", healthErr.Error()),
+			)
+		} else if healthErr = healthChecker.Check(ctx); healthErr != nil {
+			c.logger.ErrorContext(ctx, "Vault health check failed",
+				slog.String("error", healthErr.Error()),
+			)
+		}
+	}
 
 	// Create the private secrets server:
 	c.logger.InfoContext(ctx, "Creating private secrets server")
@@ -1674,4 +1736,17 @@ const emergencyServiceAccountsFlagHelp = `
 _NAMES_ - Comma-separated list of Kubernetes service account names that are allowed to access the private API with
 administrator permissions. These are intended only for emergency situations, for example when the regular authentication
 mechanisms are not working. The service accounts are expected to be in the namespace where the service is deployed.
+`
+
+const vaultEndpointFlagHelp = `
+_URL_ - Vault API endpoint URL.
+`
+
+const vaultNamespaceFlagHelp = `
+_NAMESPACE_ - Parent namespace path within the Vault-compatible
+store. Tenant namespaces are created as children of this namespace.
+`
+
+const vaultKVMountPathFlagHelp = `
+_PATH_ - KV v2 secret engine mount path within tenant namespaces.
 `

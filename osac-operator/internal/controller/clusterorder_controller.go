@@ -40,8 +40,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 
-	"github.com/osac-project/osac-operator/api/v1alpha1"
-	"github.com/osac-project/osac-operator/pkg/provisioning"
+	"github.com/osac-project/osac/osac-operator/api/v1alpha1"
+	"github.com/osac-project/osac/osac-operator/pkg/provisioning"
 )
 
 // NewComponentFn is the type of a function that creates a required component
@@ -116,6 +116,8 @@ func NewClusterOrderReconciler(
 // +kubebuilder:rbac:groups="",resources=namespaces;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=hypershift.openshift.io,resources=hostedclusters;nodepools,verbs=get;list;watch
+// +kubebuilder:rbac:groups=osac.openshift.io,resources=subnets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=osac.openshift.io,resources=networkclasses,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -417,10 +419,10 @@ func (r *ClusterOrderReconciler) handleNodePool(ctx context.Context, instance *v
 		}
 	}
 	if nodeRequestStatus == nil {
-		instance.Spec.NodeRequests = append(instance.Spec.NodeRequests, v1alpha1.NodeRequest{
+		instance.Status.NodeRequests = append(instance.Status.NodeRequests, v1alpha1.NodeRequest{
 			ResourceClass: resourceClass,
 		})
-		nodeRequestStatus = &instance.Spec.NodeRequests[len(instance.Spec.NodeRequests)-1]
+		nodeRequestStatus = &instance.Status.NodeRequests[len(instance.Status.NodeRequests)-1]
 	}
 
 	// Update the selected `nodeRequests` item:

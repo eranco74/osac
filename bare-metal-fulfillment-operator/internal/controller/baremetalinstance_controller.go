@@ -33,12 +33,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/osac-project/bare-metal-fulfillment-operator/api/v1alpha1"
-	"github.com/osac-project/bare-metal-fulfillment-operator/internal/inventory"
-	"github.com/osac-project/bare-metal-fulfillment-operator/internal/management"
-	"github.com/osac-project/bare-metal-fulfillment-operator/internal/shared"
-	opv1alpha1 "github.com/osac-project/osac-operator/api/v1alpha1"
-	"github.com/osac-project/osac-operator/pkg/provisioning"
+	"github.com/osac-project/osac/bare-metal-fulfillment-operator/api/v1alpha1"
+	"github.com/osac-project/osac/bare-metal-fulfillment-operator/internal/inventory"
+	"github.com/osac-project/osac/bare-metal-fulfillment-operator/internal/management"
+	"github.com/osac-project/osac/bare-metal-fulfillment-operator/internal/shared"
+	opv1alpha1 "github.com/osac-project/osac/osac-operator/api/v1alpha1"
+	"github.com/osac-project/osac/osac-operator/pkg/provisioning"
 )
 
 // BareMetalInstanceReconciler reconciles a BareMetalInstance object
@@ -98,6 +98,8 @@ func NewBareMetalInstanceReconciler(
 // +kubebuilder:rbac:groups=osac.openshift.io,resources=baremetalinstances/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=osac.openshift.io,resources=baremetalinstances/finalizers,verbs=update
 // +kubebuilder:rbac:groups=metal3.io,resources=baremetalhosts,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=osac.openshift.io,resources=subnets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=osac.openshift.io,resources=networkclasses,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the pool closer to the desired state.

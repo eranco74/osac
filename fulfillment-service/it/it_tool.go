@@ -35,12 +35,12 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/onsi/gomega/ghttp"
-	"github.com/osac-project/fulfillment-service/internal/auth"
-	"github.com/osac-project/fulfillment-service/internal/jq"
-	"github.com/osac-project/fulfillment-service/internal/network"
-	"github.com/osac-project/fulfillment-service/internal/oauth"
-	"github.com/osac-project/fulfillment-service/internal/testing"
-	"github.com/osac-project/fulfillment-service/internal/uuid"
+	"github.com/osac-project/osac/fulfillment-service/internal/auth"
+	"github.com/osac-project/osac/fulfillment-service/internal/jq"
+	"github.com/osac-project/osac/fulfillment-service/internal/network"
+	"github.com/osac-project/osac/fulfillment-service/internal/oauth"
+	"github.com/osac-project/osac/fulfillment-service/internal/testing"
+	"github.com/osac-project/osac/fulfillment-service/internal/uuid"
 	"go.yaml.in/yaml/v2"
 	"google.golang.org/grpc"
 	grpccodes "google.golang.org/grpc/codes"
@@ -55,9 +55,9 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	privatev1 "github.com/osac-project/fulfillment-service/internal/api/osac/private/v1"
-	publicv1 "github.com/osac-project/fulfillment-service/internal/api/osac/public/v1"
-	"github.com/osac-project/fulfillment-service/internal/version"
+	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
+	publicv1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/public/v1"
+	"github.com/osac-project/osac/fulfillment-service/internal/version"
 )
 
 var ServiceAccountTenants = map[string]string{
@@ -367,6 +367,18 @@ func (t *Tool) Setup(ctx context.Context) error {
 		return err
 	}
 
+	// Install OpenBao:
+	err = t.deployOpenBao(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Configure OpenBao (create parent namespace):
+	err = t.configureOpenBao(ctx)
+	if err != nil {
+		return err
+	}
+
 	// Create the service database resources:
 	err = t.createServiceDatabaseResources(ctx)
 	if err != nil {
@@ -484,10 +496,20 @@ func (t *Tool) buildImage(ctx context.Context) (result string, err error) {
 	if t.debug {
 		buildTarget = "runtime-debug"
 	}
+	// The Containerfile expects the mono-repo root as build context so
+	// that cross-module dependencies resolve from sibling directories.
+	buildContext := t.projectDir
+	containerfile := "Containerfile"
+	monoRepoRoot := filepath.Dir(t.projectDir)
+	if _, statErr := os.Stat(filepath.Join(monoRepoRoot, "go.work")); statErr == nil {
+		buildContext = monoRepoRoot
+		containerfile = filepath.Join(filepath.Base(t.projectDir), "Containerfile")
+	}
+
 	buildCmd, err := testing.NewCommand().
 		SetLogger(t.logger).
 		SetHome(t.projectDir).
-		SetDir(t.projectDir).
+		SetDir(buildContext).
 		SetName(podmanCmd).
 		SetArgs(
 			"build",
@@ -495,7 +517,7 @@ func (t *Tool) buildImage(ctx context.Context) (result string, err error) {
 			"--build-arg", fmt.Sprintf("VERSION=%s", gitVersion),
 			"--target", buildTarget,
 			"--tag", imageRef,
-			"--file", "Containerfile",
+			"--file", containerfile,
 			".",
 		).
 		Build()
@@ -1375,6 +1397,93 @@ func (t *Tool) deployPostgres(ctx context.Context) error {
 	return nil
 }
 
+// deployOpenBao installs the OpenBao chart in dev mode as a Vault-compatible secret store.
+func (t *Tool) deployOpenBao(ctx context.Context) error {
+	t.logger.DebugContext(ctx, "Installing OpenBao chart")
+
+	valuesData := map[string]any{
+		"dev": map[string]any{
+			"rootToken":     t.secret,
+			"listenAddress": "0.0.0.0:8200",
+		},
+		"caBundle": map[string]any{
+			"configMap": "ca-bundle",
+		},
+	}
+	valuesBytes, err := yaml.Marshal(valuesData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal OpenBao values to YAML: %w", err)
+	}
+
+	valuesFile := filepath.Join(t.tmpDir, "openbao-values.yaml")
+	err = os.WriteFile(valuesFile, valuesBytes, 0400)
+	if err != nil {
+		return fmt.Errorf("failed to write OpenBao values to file: %w", err)
+	}
+
+	installCmd, err := testing.NewCommand().
+		SetLogger(t.logger).
+		SetHome(t.projectDir).
+		SetDir(t.projectDir).
+		SetName(helmCmd).
+		SetArgs(
+			"upgrade",
+			"--install",
+			"openbao",
+			"it/charts/openbao",
+			"--kubeconfig", t.kcFile,
+			"--namespace", "openbao",
+			"--create-namespace",
+			"--values", valuesFile,
+			"--wait",
+		).
+		Build()
+	if err != nil {
+		return fmt.Errorf("failed to create OpenBao install command: %w", err)
+	}
+	if err = installCmd.Execute(ctx); err != nil {
+		return fmt.Errorf("failed to install OpenBao: %w", err)
+	}
+	return nil
+}
+
+// configureOpenBao sets up the parent namespace in the OpenBao secret store using kubectl exec to run the bao CLI
+// inside the pod.
+func (t *Tool) configureOpenBao(ctx context.Context) error {
+	t.logger.DebugContext(ctx, "Configuring OpenBao")
+
+	cmd, err := testing.NewCommand().
+		SetLogger(t.logger).
+		SetHome(t.projectDir).
+		SetDir(t.projectDir).
+		SetName(kubectlCmd).
+		SetArgs(
+			"exec", "openbao",
+			"--namespace", "openbao",
+			"--kubeconfig", t.kcFile,
+			"--",
+			"env",
+			"BAO_ADDR=http://127.0.0.1:8200",
+			fmt.Sprintf("BAO_TOKEN=%s", t.secret),
+			"bao", "namespace", "create", "osac",
+		).
+		Build()
+	if err != nil {
+		return fmt.Errorf("failed to create command to configure OpenBao: %w", err)
+	}
+	stdout, _, err := cmd.Evaluate(ctx)
+	if err != nil {
+		if strings.Contains(string(stdout), "already exists") {
+			t.logger.DebugContext(ctx, "OpenBao osac namespace already exists")
+		} else {
+			return fmt.Errorf("failed to create osac namespace in OpenBao: %w", err)
+		}
+	}
+
+	t.logger.InfoContext(ctx, "Configured OpenBao with parent namespace")
+	return nil
+}
+
 func (t *Tool) deployService(ctx context.Context, imageRef string) error {
 	// Prepare the values:
 	externalHostname, _, err := net.SplitHostPort(externalServiceAddr)
@@ -1485,6 +1594,11 @@ func (t *Tool) deployService(ctx context.Context, imageRef string) error {
 					},
 				},
 			},
+		},
+		"vault": map[string]any{
+			"endpoint":    fmt.Sprintf("http://%s", openbaoAddr),
+			"namespace":   "osac",
+			"kvMountPath": "secret",
 		},
 	}
 	valuesBytes, err := yaml.Marshal(valuesData)
@@ -2115,6 +2229,7 @@ func (t *Tool) waitForRestGatewayReady(ctx context.Context) error {
 			)
 			return err
 		}
+		_, _ = io.Copy(io.Discard, response.Body)
 		response.Body.Close()
 		if response.StatusCode != http.StatusOK {
 			err = fmt.Errorf("REST gateway returned status %d", response.StatusCode)
@@ -2179,6 +2294,9 @@ func (t *Tool) registerHub(ctx context.Context) error {
 	_, err = hubsClient.Create(ctx, privatev1.HubsCreateRequest_builder{
 		Object: privatev1.Hub_builder{
 			Id: hubId,
+			Metadata: privatev1.Metadata_builder{
+				Name: hubId,
+			}.Build(),
 			Spec: privatev1.HubSpec_builder{
 				Kubeconfig: hubKcBytes,
 				Namespace:  hubNamespace,
@@ -2496,6 +2614,7 @@ const (
 	keycloakAddr        = "keycloak.keycloak.svc.cluster.local:8000"
 	externalServiceAddr = "fulfillment-api.osac.svc.cluster.local:8000"
 	internalServiceAddr = "fulfillment-internal-api.osac.svc.cluster.local:8000"
+	openbaoAddr         = "openbao.openbao.svc.cluster.local:8200"
 )
 
 // Names of the database-related Kubernetes resources.

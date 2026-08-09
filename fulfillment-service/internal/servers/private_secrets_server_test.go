@@ -26,11 +26,11 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
-	privatev1 "github.com/osac-project/fulfillment-service/internal/api/osac/private/v1"
-	"github.com/osac-project/fulfillment-service/internal/auth"
-	"github.com/osac-project/fulfillment-service/internal/database"
-	"github.com/osac-project/fulfillment-service/internal/events"
-	"github.com/osac-project/fulfillment-service/internal/vault"
+	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
+	"github.com/osac-project/osac/fulfillment-service/internal/auth"
+	"github.com/osac-project/osac/fulfillment-service/internal/database"
+	"github.com/osac-project/osac/fulfillment-service/internal/events"
+	"github.com/osac-project/osac/fulfillment-service/internal/vault"
 )
 
 var _ = Describe("Private secrets server", func() {
@@ -294,6 +294,9 @@ var _ = Describe("Private secrets server", func() {
 			It("Create without name fails", func() {
 				_, err := server.Create(ctx, privatev1.SecretsCreateRequest_builder{
 					Object: privatev1.Secret_builder{
+						Metadata: privatev1.Metadata_builder{
+							Name: "",
+						}.Build(),
 						Spec: privatev1.SecretSpec_builder{
 							Data: map[string][]byte{
 								"key": []byte("value"),
