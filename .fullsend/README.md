@@ -5,12 +5,17 @@ This directory contains fullsend-specific configuration and guidance documents t
 ## Files
 
 ### Core Configuration
-- **config.yaml** - fullsend installation configuration (roles, allowed resources, issue creation targets)
+- **config.yaml** - fullsend installation configuration (roles, allowed resources, issue creation targets, context files)
+- **customized/agents/review.md** - Custom review agent with OSAC-specific system instructions
 
 ### Review Guidance (READ THESE FIRST)
 - **REVIEW_GUIDE.md** - Anti-patterns, hallucination prevention, scope boundaries, framework-specific knowledge
 - **INVARIANTS.md** - Architectural invariants to enforce and common bug patterns to detect
 - **COMPONENT_MAP.md** - Cross-file relationships and where to look for related changes
+- **MONITORING.md** - Quality metrics tracking, iteration triggers, feedback collection
+
+### Helper Scripts
+- **customized/scripts/analyze-pr-context.sh** - Uses graphify to discover cross-file relationships for PR files
 
 ## How fullsend Should Use These Documents
 
@@ -108,11 +113,60 @@ Before submitting findings, verify:
 
 If you have <3 findings in Round 2+, stop reviewing - diminishing returns.
 
+## Using graphify for Enhanced Context
+
+fullsend can leverage OSAC's knowledge graph for better cross-file analysis:
+
+```bash
+# Analyze PR context using graphify
+.fullsend/customized/scripts/analyze-pr-context.sh path/to/changed/file.go
+
+# Or query directly
+graphify query "what files reference disk.proto"
+graphify path "computeinstance_types.go" "Ansible playbook"
+graphify explain "tenant isolation pattern"
+```
+
+This prevents fullsend from missing cross-file relationships that grep alone can't find.
+
+## Setup Verification
+
+After merging this PR, verify fullsend configuration:
+
+```bash
+# 1. Check config.yaml context_files are readable
+for file in $(yq '.context_files[]' .fullsend/config.yaml); do
+  if [[ -f "$file" ]]; then
+    echo "✓ $file"
+  else
+    echo "✗ $file (missing)"
+  fi
+done
+
+# 2. Verify graphify is available
+if command -v graphify &>/dev/null && [[ -f graphify-out/graph.json ]]; then
+  echo "✓ graphify integration ready"
+else
+  echo "⚠ graphify not available (install: uv tool install graphifyy)"
+fi
+
+# 3. Test PR context analysis script
+.fullsend/customized/scripts/analyze-pr-context.sh \
+  fulfillment-service/pkg/api/compute/v1alpha1/disk.proto
+```
+
 ## Feedback Loop
 
 If a finding is marked as false positive or "not actionable" by OSAC team:
 1. Check which section of these docs should have caught it
 2. Update the relevant doc to prevent future similar findings
-3. File issue to fullsend-ai/fullsend if it's a systemic problem
+3. Use MONITORING.md tracking template to log the issue
+4. File issue to fullsend-ai/fullsend if it's a systemic problem
 
-These docs are living documents - they should evolve based on review feedback.
+**Monthly cadence**:
+- Week 1: Collect data on 3-5 PRs using MONITORING.md template
+- Week 2: Analyze patterns, identify recurring issues
+- Week 3: Update .fullsend/ docs based on patterns
+- Week 4: Measure improvement against baseline metrics
+
+These docs are living documents - they should evolve based on review feedback. See MONITORING.md for iteration triggers and success criteria.
