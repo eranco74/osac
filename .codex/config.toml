@@ -6,3 +6,14 @@
 # component AGENTS.md files. The current compact files fit within the default;
 # this leaves modest headroom without restoring the former oversized budget.
 project_doc_max_bytes = 32768
+
+[tui]
+status_line = [
+  "model-with-reasoning",
+  "current-dir",
+  "git-branch",
+  "context-remaining",
+  "estimated-thread-cost",
+  "pull-request-number",
+]
+status_line_use_colors = true
