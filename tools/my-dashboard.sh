@@ -526,7 +526,7 @@ for i in "${!GH_REPOS[@]}"; do
                 {
                     number,
                     title,
-                    author: .author.login,
+                    author: ((.author // {}).login // ""),
                     url,
                     repo: $repo,
                     created_at: .createdAt,
@@ -604,7 +604,7 @@ for i in "${!GH_REPOS[@]}"; do
         gh pr list --repo "$repo" --state open \
             --json number,title,author,url,createdAt,labels 2>/dev/null \
         | jq --arg repo "$repo" \
-            '[.[]|{number, title, author: .author.login, url, repo: $repo, created_at: .createdAt, labels: [.labels[].name]}]' \
+            '[.[]|{number, title, author: ((.author // {}).login // ""), url, repo: $repo, created_at: .createdAt, labels: [.labels[].name]}]' \
         || echo '[]'
     ) > "$TMP_DIR/all_prs/gh_$i.json" 2>/dev/null &
 done
@@ -621,7 +621,13 @@ else
 fi
 
 # Fetch org members dynamically for team/external categorization
-ORG_MEMBERS=$(gh api orgs/$GH_ORG/members --paginate --jq '.[].login' 2>/dev/null | jq -R -s '[split("\n")[]|select(length>0)]')
+if ! ORG_MEMBERS=$(gh api orgs/$GH_ORG/members --paginate --jq '.[].login' 2>/dev/null | jq -R -s '[split("\n")[]|select(length>0)]'); then
+    ORG_MEMBERS='[]'
+fi
+ORG_MEMBER_COUNT=$(echo "$ORG_MEMBERS" | jq 'length')
+if (( ORG_MEMBER_COUNT == 0 )); then
+    print_warn "No organization members returned for $GH_ORG; skipping external contributor PRs."
+fi
 
 # ══════════════════════════════════════════════════════════════
 # SECTION 4: BOT PRs
@@ -657,18 +663,23 @@ fi
 
 section_header "🌐" "External Contributor PRs"
 
-EXTERNAL_PRS=$(echo "$ALL_PRS" | jq \
-    --argjson members "$ORG_MEMBERS" \
-    --arg me "$GH_USER" \
-    '[.[] | select(
-        .author as $a |
-        ($members | any(. == $a) | not) and
-        ($a | test("\\[bot\\]$|^app/|bot$|^dependabot|^renovate|^github-actions") | not) and
-        ($a != $me)
-    )]')
+EXTERNAL_PRS='[]'
+if (( ORG_MEMBER_COUNT > 0 )); then
+    EXTERNAL_PRS=$(echo "$ALL_PRS" | jq \
+        --argjson members "$ORG_MEMBERS" \
+        --arg me "$GH_USER" \
+        '[.[] | select(
+            .author as $a |
+            ($members | any(. == $a) | not) and
+            ($a | test("\\[bot\\]$|^app/|bot$|^dependabot|^renovate|^github-actions") | not) and
+            ($a != $me)
+        )]')
+fi
 EXTERNAL_COUNT=$(echo "$EXTERNAL_PRS" | jq 'length')
 
-if (( EXTERNAL_COUNT > 0 )); then
+if (( ORG_MEMBER_COUNT == 0 )); then
+    echo -e "  ${DIM}Organization members unavailable — skipping this section.${NC}"
+elif (( EXTERNAL_COUNT > 0 )); then
     echo "$EXTERNAL_PRS" | jq -c 'sort_by(.created_at)|.[]' | while read -r row; do
         repo=$(echo "$row" | jq -r '.repo')
         number=$(echo "$row" | jq -r '.number')
