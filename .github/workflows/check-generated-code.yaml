@@ -4,9 +4,10 @@ on:
 # No paths filter: the required check name "Check generated code (proto)" must
 # report on every PR. Skip is on job steps (dorny + should-run); a trigger path
 # filter would leave the name pending forever on PRs that don't touch proto/.
-  # pull_request_target loads this workflow from the base/default branch, so a
-  # PR does not need to rebase just to receive a renamed required check.
-  pull_request_target:
+  # pull_request runs unprivileged and actions/checkout supplies GitHub's
+  # synthetic PR merge ref by default. Applying the replay label refreshes
+  # that ref with the current main workflow for an existing PR.
+  pull_request:
     branches:
       - main
     # Applying this label lets a maintainer replay the required check for an
@@ -39,7 +40,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
-        if: github.event_name == 'pull_request_target' || github.event_name == 'merge_group'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         id: filter
         with:
           filters: |
@@ -59,7 +60,7 @@ jobs:
     # let the required check pass without buf generate. Fail in the first step.
     if: >-
       always() &&
-      (github.event_name != 'pull_request_target' ||
+      (github.event_name != 'pull_request' ||
       github.event.action != 'labeled' ||
       github.event.label.name == 'ci-retest-generated-code')
     runs-on: ubuntu-latest
@@ -72,15 +73,13 @@ jobs:
       - id: should-run
         if: needs.changes.result == 'success' && needs.changes.outputs.proto == 'true'
         run: echo "run=true" >> "$GITHUB_OUTPUT"
-      # pull_request_target supplies the workflow from the base branch, but
-      # the source under test remains GitHub's synthetic PR merge ref. This
-      # preserves the old pull_request checkout semantics without executing
-      # the workflow file supplied by the PR.
-      - if: steps.should-run.outputs.run == 'true' && github.event_name == 'pull_request_target'
+      # On pull_request, the default checkout is GitHub's synthetic merge ref
+      # and the job runs with the unprivileged PR token. Avoid a custom ref:
+      # actions/checkout v7 intentionally rejects fork PR refs from trusted
+      # pull_request_target workflows.
+      - if: steps.should-run.outputs.run == 'true' && github.event_name == 'pull_request'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          repository: ${{ github.repository }}
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
           persist-credentials: false
       - if: steps.should-run.outputs.run == 'true' && github.event_name == 'merge_group'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
