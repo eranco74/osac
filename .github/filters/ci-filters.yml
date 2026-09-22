@@ -158,6 +158,7 @@ e2e-code:
   - '!**/it/**'
   - '!**/conftest.py'
   - '!**/fixtures/**'
+  - '!tools/pr-notify/**'
 e2e-suite:
   - 'tests/e2e/**'
 
@@ -220,6 +221,7 @@ vmaas-outside-known-safe:
   - '!tests/e2e/caas/**'
   - '!tests/e2e/bmaas/**'
   - '!tests/e2e/references/test_cluster_baremetal_references.py'
+  - '!tools/pr-notify/**'
 caas-outside-known-safe:
   - '**'
   - '!**/*.md'
@@ -234,6 +236,7 @@ caas-outside-known-safe:
   - '!.pre-commit-config.yaml'
   - '!tests/e2e/vmaas/**'
   - '!tests/e2e/bmaas/**'
+  - '!tools/pr-notify/**'
 bmaas-outside-known-safe:
   - '**'
   - '!**/*.md'
@@ -248,6 +251,7 @@ bmaas-outside-known-safe:
   - '!.pre-commit-config.yaml'
   - '!tests/e2e/vmaas/**'
   - '!tests/e2e/caas/**'
+  - '!tools/pr-notify/**'
 
 # --- Every other required-check job category (deterministic-only, no AI) --
 # Mirrors -- as closely as each real workflow's own filter allows -- the
@@ -280,6 +284,7 @@ code:
   - '!.skillsaw.yaml'
   - '!.pre-commit-config.yaml'
   - '!osac-ui/**'
+  - '!tools/pr-notify/**'
 
 # unit-tests.yml's own `ui` filter -- gates run-osac-ui-tests, which `code`
 # above deliberately excludes.

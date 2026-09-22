@@ -163,6 +163,21 @@ class TestClassifier(unittest.TestCase):
         result = classify_prs([pr])
         self.assertEqual(result[0].status, PRStatus.CI_FAILING)
 
+    def test_failed_check_is_ci_failure_without_aggregate_status(self):
+        """A failed check is authoritative when aggregate status is absent."""
+        pr = _make_pr(
+            ci_status=None,
+            check_runs=[
+                CheckRun(
+                    name="unit-tests",
+                    conclusion="FAILURE",
+                    details_url="https://example.com/tests",
+                )
+            ],
+        )
+        result = classify_prs([pr])
+        self.assertEqual(result[0].status, PRStatus.CI_FAILING)
+
     def test_mergeable_unknown_not_classified_as_conflicts(self):
         """7d. PR with mergeable UNKNOWN -> falls through to CI/review priority."""
         pr = _make_pr(mergeable="UNKNOWN", ci_status="SUCCESS")

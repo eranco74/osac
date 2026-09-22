@@ -45,9 +45,6 @@ def _has_failing_ci(pr: PRData) -> bool:
         # provide individual check contexts.
         return pr.ci_status in ("FAILURE", "ERROR")
 
-    if pr.ci_status not in ("FAILURE", "ERROR"):
-        return False
-
     return any(
         (check.name or "").strip().casefold() not in _NON_CI_CHECK_NAMES
         and check.conclusion not in _NON_FAILING_CHECK_CONCLUSIONS
