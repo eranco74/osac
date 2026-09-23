@@ -11,6 +11,7 @@ tool_command=$(jq -r '.tool_input.command // empty' <<<"$input")
 
 repo_root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || exit 0
 
+# Check whether a repository-relative path is one of the shared proto sources.
 is_proto_source() {
   case "$1" in
     proto/private/*.proto|proto/tests/*.proto) return 0 ;;
@@ -18,26 +19,38 @@ is_proto_source() {
   esac
 }
 
+# Block the requested tool action with a validation error message.
 validation_failed() {
   echo "OSAC hook validation failed: $*" >&2
   exit 2
 }
 
+# Fingerprint tracked changes and untracked files generated under a component.
 workspace_fingerprint() {
-  local component_path=$1
+  local component_path=$1 path
   {
     git -C "$repo_root" diff --binary HEAD -- "$component_path"
-    find "$repo_root/$component_path" -type f -name '*.go' -exec cksum {} + | LC_ALL=C sort
+    {
+      find "$repo_root/$component_path" -type f -name '*.go' -exec cksum {} +
+      while IFS= read -r -d '' path; do
+        cksum "$repo_root/$path"
+      done < <(git -C "$repo_root" ls-files --others --exclude-standard -z -- "$component_path")
+    } | LC_ALL=C sort
   }
 }
 
+# Run canonical shared proto lint and block the tool action on errors.
 run_proto_lint() {
   make -C "$repo_root/proto" lint || validation_failed "proto lint failed; fix it before continuing."
 }
 
+# Lint proto sources present in the staged, modified, or untracked worktree.
 run_commit_checks() {
   local paths path
-  paths=$(git -C "$repo_root" diff --name-only HEAD --)
+  paths=$({
+    git -C "$repo_root" diff --name-only HEAD --
+    git -C "$repo_root" ls-files --others --exclude-standard
+  })
   while IFS= read -r path; do
     if is_proto_source "$path"; then
       run_proto_lint
@@ -46,6 +59,7 @@ run_commit_checks() {
   done <<<"$paths"
 }
 
+# Normalize supported GitHub remote URL forms to owner/repository.
 github_repo_from_url() {
   local url=$1
   case "$url" in
@@ -60,6 +74,7 @@ github_repo_from_url() {
   printf '%s' "$url"
 }
 
+# Read explicit --base and --repo options from the gh pr create command.
 parse_create_target() {
   local -a words
   local line i
@@ -88,6 +103,7 @@ parse_create_target() {
   done <<<"$tool_command"
 }
 
+# Resolve a local ref for the target repository's pull-request base branch.
 resolve_base_ref() {
   local repository_info target_repo default_branch remote remote_repo remote_url
   parse_create_target
@@ -120,6 +136,7 @@ resolve_base_ref() {
   return 1
 }
 
+# Collect committed, uncommitted, and untracked paths changed from the PR base.
 get_pr_paths() {
   local base_ref merge_base
   base_ref=$(resolve_base_ref) || return 1
@@ -131,6 +148,7 @@ get_pr_paths() {
   } | sort -u
 }
 
+# Run fulfillment-service formatting drift detection, proto lint, and unit tests.
 run_service_checks() {
   local paths=$1 path before after
   before=$(workspace_fingerprint fulfillment-service)
@@ -152,8 +170,9 @@ run_service_checks() {
   (cd "$repo_root/fulfillment-service" && ginkgo run -r internal) || validation_failed "fulfillment-service unit tests failed."
 }
 
+# Run operator formatting, lint, tests, and post-test generation drift detection.
 run_operator_checks() {
-  local before after
+  local before after after_test
   before=$(workspace_fingerprint osac-operator)
   make -C "$repo_root/osac-operator" fmt || validation_failed "osac-operator formatting failed."
   after=$(workspace_fingerprint osac-operator)
@@ -162,12 +181,21 @@ run_operator_checks() {
   fi
   make -C "$repo_root/osac-operator" lint || validation_failed "osac-operator lint failed."
   make -C "$repo_root/osac-operator" test || validation_failed "osac-operator tests failed."
+  after_test=$(workspace_fingerprint osac-operator)
+  if [[ "$after" != "$after_test" ]]; then
+    validation_failed "make test modified or generated osac-operator files; review and commit those changes before creating the PR."
+  fi
 }
 
+# Select changed-component checks, falling back to both when base resolution fails.
 run_pr_checks() {
   local paths path service_changed=0 operator_changed=0
   if ! paths=$(get_pr_paths); then
     echo "OSAC hook could not resolve the PR base and changed paths; validating both components." >&2
+    paths=$({
+      git -C "$repo_root" ls-files -- fulfillment-service
+      git -C "$repo_root" ls-files --others --exclude-standard -- fulfillment-service
+    })
     service_changed=1
     operator_changed=1
   else
@@ -191,7 +219,9 @@ run_pr_checks() {
   fi
 }
 
-case "$tool_command" in
-  *"git commit"*) run_commit_checks ;;
-  *"gh pr create"*) run_pr_checks ;;
-esac
+if [[ "$tool_command" == *"git commit"* ]]; then
+  run_commit_checks
+fi
+if [[ "$tool_command" == *"gh pr create"* ]]; then
+  run_pr_checks
+fi
