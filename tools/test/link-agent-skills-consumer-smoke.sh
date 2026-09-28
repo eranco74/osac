@@ -108,6 +108,12 @@ fi
 [[ "${LINK_CURSOR}" == true ]] && link_agent "${PROJECT_ROOT}/.cursor" Cursor
 [[ "${LINK_GEMINI}" == true ]] && link_agent "${PROJECT_ROOT}/.gemini" Gemini
 [[ "${LINK_CODEX}" == true ]] && link_agent "${PROJECT_ROOT}/.agents" Codex
+STUB_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "${LINK_CLAUDE}" == true && -f "${STUB_REPO}/.claude/rules/architecture-patterns.md" ]]; then
+  mkdir -p "${PROJECT_ROOT}/.claude/rules"
+  safe_symlink "${PROJECT_ROOT}/.claude/rules/architecture-patterns.md" \
+    "${STUB_REPO}/.claude/rules/architecture-patterns.md"
+fi
 exit 0
 STUB
   chmod +x "$dest"
@@ -168,16 +174,22 @@ seed_vendor() {
   chmod +x "${vendor}/tools/link-agent-skills.sh"
 
   local real_skills=""
-  for candidate in \
-    "${REPO_ROOT}/.osac-ai-skills/skills" \
-    "${REPO_ROOT}/../.osac-ai-skills/skills" \
-    "${REPO_ROOT}/../osac-ai-skills/skills" \
-    "${REPO_ROOT}/../skills"; do
-    if [[ -d "${candidate}/create-pr" ]]; then
-      real_skills=$(cd "$candidate" && pwd -P)
-      break
-    fi
-  done
+  if [[ "$USING_STUB" == true ]]; then
+    for candidate in \
+      "${REPO_ROOT}/.osac-ai-skills/skills" \
+      "${REPO_ROOT}/../.osac-ai-skills/skills" \
+      "${REPO_ROOT}/../osac-ai-skills/skills" \
+      "${REPO_ROOT}/../skills"; do
+      if [[ -d "${candidate}/create-pr" ]]; then
+        real_skills=$(cd "$candidate" && pwd -P)
+        break
+      fi
+    done
+  else
+    real_skills=$(cd "$(dirname "$VENDOR_FANOUT")/../skills" && pwd -P)
+    [[ -d "${real_skills}/create-pr" ]] \
+      || fail "selected fan-out has no create-pr skill: ${real_skills}"
+  fi
 
   local name
   for name in "${OSAC_SKILL_NAMES[@]}"; do
@@ -234,6 +246,12 @@ test_materialize_and_link() {
   local target
   target=$(readlink "${ws}/skills/create-pr")
   [[ "$target" = /* ]] || fail "expected absolute symlink target, got: $target"
+  if [[ "$USING_STUB" != true ]]; then
+    local selected_skill
+    selected_skill=$(realpath "$(dirname "$VENDOR_FANOUT")/../skills/create-pr")
+    [[ "$(realpath "${ws}/skills/create-pr")" == "$selected_skill" ]] \
+      || fail "create-pr came from a different vendor than the selected fan-out"
+  fi
 
   [[ -L "${ws}/.claude/skills" ]] || fail ".claude/skills is not a symlink"
   [[ -L "${ws}/.cursor/skills" ]] || fail ".cursor/skills is not a symlink"
@@ -313,6 +331,29 @@ test_refuse_real_skill_directory() {
   echo "$err" | grep -qi 'not a symlink\|refusing\|real directory' \
     || fail "expected refusal message, got: $err"
   pass "refuses to replace a real skill directory"
+}
+
+test_refuse_real_shared_rule_file() {
+  local ws
+  ws=$(mktemp -d "${TMPDIR_ROOT}/refuse-rule.XXXXXX")
+  seed_vendor "$ws"
+  write_stub_fanout "${ws}/.osac-ai-skills/tools/link-agent-skills.sh"
+  mkdir -p "${ws}/.osac-ai-skills/.claude/rules" "${ws}/.claude/rules"
+  echo "# vendor rule" >"${ws}/.osac-ai-skills/.claude/rules/architecture-patterns.md"
+  echo "stale local copy" >"${ws}/.claude/rules/architecture-patterns.md"
+  install_wrapper "$ws"
+
+  local rc=0
+  local err
+  err=$(run_wrapper "$ws" --claude 2>&1) || rc=$?
+  [[ "$rc" -ne 0 ]] || fail "expected failure for a real shared rule file"
+  echo "$err" | grep -q 'architecture-patterns.md' \
+    || fail "expected failure at the shared rule path, got: $err"
+  echo "$err" | grep -qi 'not a symlink\|refusing to replace' \
+    || fail "expected refusal message, got: $err"
+  [[ "$(cat "${ws}/.claude/rules/architecture-patterns.md")" == "stale local copy" ]] \
+    || fail "the existing shared rule file was changed"
+  pass "refuses to replace a real shared rule file"
 }
 
 test_prunes_removed_vendor_skill() {
@@ -534,6 +575,7 @@ test_vendor_override_env_var_is_authoritative
 test_materialize_and_link
 test_codex_links_agents_umbrella
 test_refuse_real_skill_directory
+test_refuse_real_shared_rule_file
 test_prunes_removed_vendor_skill
 test_verify_shared_files_are_symlinks
 test_promotes_legacy_real_umbrella_dirs
