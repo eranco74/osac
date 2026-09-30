@@ -20,6 +20,9 @@ documentation for architecture, setup, and detailed conventions. Root
 [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`CONVENTIONS.md`](CONVENTIONS.md)
 provide the detailed cross-component reference. Also in this directory:
 
+- [agent-context/](agent-context/README.md) — maintained networking decisions,
+  installer/Wizard integration, feature dimensions, and review expectations,
+  routed from `AGENTS.md` for every coding agent.
 - [codex-getting-started.md](codex-getting-started.md) — onboarding OpenAI
   Codex against an OSAC checkout (install, `/import`, permissions, hook trust,
   MCP, and workflow differences).
