@@ -94,10 +94,14 @@ def remove_scope(keycloak_url: str, username: str, password: str) -> None:
     mappers_path = f"/admin/realms/osac/client-scopes/{quote(scope['id'], safe='')}/protocol-mappers/models"
     mappers = reconciler.admin_request(keycloak_url, token, "GET", mappers_path)
     audience_mapper = next(
-        (item for item in mappers if item.get("name") == "osac-api-audience"),
+        (item for item in mappers if item.get("name") == reconciler.AUDIENCE_MAPPER["name"]),
         None,
     ) if isinstance(mappers, list) else None
-    if not audience_mapper or audience_mapper.get("config", {}).get("included.custom.audience") != "osac-api":
+    if (
+        not audience_mapper
+        or audience_mapper.get("config", {}).get("included.custom.audience")
+        != reconciler.AUDIENCE_MAPPER["config"]["included.custom.audience"]
+    ):
         raise RuntimeError("the local Kind realm does not have the expected osac-api audience mapper before the test")
 
     reconciler.admin_request(

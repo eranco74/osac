@@ -23,7 +23,7 @@ SCOPE_ATTRIBUTES = {
     "include.in.openid.provider.metadata": "false",
 }
 AUDIENCE_MAPPER = {
-    "name": "osac-api-audience",
+    "name": "osac-api-aud",
     "protocol": "openid-connect",
     "protocolMapper": "oidc-audience-mapper",
     "consentRequired": False,
@@ -36,6 +36,9 @@ AUDIENCE_MAPPER = {
     },
 }
 DEFAULT_CLIENT_SCOPES = ["groups", "basic", "username", "organization", "roles", SCOPE_NAME]
+# Keep these clients aligned with the osac-api default scopes in realm.json. When
+# the scope is deleted and recreated, Keycloak drops its existing client links.
+API_SCOPE_CLIENT_IDS = ("osac-cli", "osac-ui", "osac-admin", "osac-ui-backend", "osac-csi-driver")
 
 
 class KeycloakError(RuntimeError):
@@ -210,6 +213,43 @@ def _ensure_scope(keycloak_url: str, token: str) -> dict[str, Any]:
     return scope
 
 
+def _ensure_default_scope_assignment(
+    keycloak_url: str,
+    token: str,
+    scope: dict[str, Any],
+    client_id: str,
+    client_description: str,
+) -> None:
+    clients_path = f"/admin/realms/{REALM}/clients"
+    query = urllib.parse.urlencode({"clientId": client_id})
+    clients = _list(admin_request(keycloak_url, token, "GET", f"{clients_path}?{query}"), "client")
+    client = next((item for item in clients if item.get("clientId") == client_id), None)
+    if client is None or not isinstance(client.get("id"), str) or not client["id"]:
+        raise KeycloakError(f"Keycloak did not expose {client_description} while assigning {SCOPE_NAME}")
+
+    client_uuid = urllib.parse.quote(client["id"], safe="")
+    scope_uuid = urllib.parse.quote(scope["id"], safe="")
+    assignment_path = f"{clients_path}/{client_uuid}/default-client-scopes/{scope_uuid}"
+    try:
+        admin_request(keycloak_url, token, "PUT", assignment_path)
+    except KeycloakError as error:
+        raise KeycloakError(
+            f"could not assign {SCOPE_NAME} as a default client scope to {client_description}: {error}"
+        ) from None
+
+    default_scopes = _list(
+        admin_request(keycloak_url, token, "GET", f"{clients_path}/{client_uuid}/default-client-scopes"),
+        "default client scope",
+    )
+    if not any(item.get("id") == scope["id"] and item.get("name") == SCOPE_NAME for item in default_scopes):
+        raise KeycloakError(f"Keycloak did not attach {SCOPE_NAME} to {client_description} default scopes")
+
+
+def _ensure_api_client_scope_assignments(keycloak_url: str, token: str, scope: dict[str, Any]) -> None:
+    for client_id in API_SCOPE_CLIENT_IDS:
+        _ensure_default_scope_assignment(keycloak_url, token, scope, client_id, f"API client '{client_id}'")
+
+
 def _ensure_exchange_client(
     keycloak_url: str,
     token: str,
@@ -260,26 +300,13 @@ def _ensure_exchange_client(
     if client is None or not isinstance(client.get("id"), str) or not client["id"]:
         raise KeycloakError("Keycloak did not expose the MCP exchange client after reconciliation")
 
-    client_id = urllib.parse.quote(client["id"], safe="")
-    scope_id = urllib.parse.quote(scope["id"], safe="")
-    assignment_path = f"{clients_path}/{client_id}/default-client-scopes/{scope_id}"
-    try:
-        admin_request(keycloak_url, token, "PUT", assignment_path)
-    except KeycloakError as error:
-        raise KeycloakError(
-            f"could not assign {SCOPE_NAME} as a default client scope to the MCP exchange client; "
-            f"verify Keycloak realm-management permissions: {error}"
-        ) from None
-
-    default_scopes = _list(
-        admin_request(keycloak_url, token, "GET", f"{clients_path}/{client_id}/default-client-scopes"),
-        "default client scope",
+    _ensure_default_scope_assignment(
+        keycloak_url,
+        token,
+        scope,
+        resource_url,
+        f"MCP exchange client '{resource_url}'",
     )
-    if not any(item.get("id") == scope["id"] and item.get("name") == SCOPE_NAME for item in default_scopes):
-        raise KeycloakError(
-            f"Keycloak did not attach {SCOPE_NAME} to the MCP exchange client's default scopes; "
-            "check the client configuration and realm-management permissions"
-        )
 
 
 def reconcile(
@@ -289,13 +316,14 @@ def reconcile(
     resource_url: str | None = None,
     exchange_secret: str | None = None,
 ) -> None:
-    """Create/repair the audience scope, then optionally configure its MCP client."""
+    """Create/repair the audience scope and its API clients, then configure the MCP client."""
     token = get_admin_token(keycloak_url, admin_username, admin_password)
     scope = _ensure_scope(keycloak_url, token)
     if bool(resource_url) != bool(exchange_secret):
         raise KeycloakError(
             "MCP_RESOURCE_URL and MCP_EXCHANGE_SECRET must both be configured for client reconciliation"
         )
+    _ensure_api_client_scope_assignments(keycloak_url, token, scope)
     if resource_url and exchange_secret:
         _ensure_exchange_client(keycloak_url, token, scope, resource_url, exchange_secret)
 

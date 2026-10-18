@@ -22,6 +22,8 @@ assert SPEC is not None and SPEC.loader is not None
 RECONCILER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RECONCILER)
 
+API_CLIENT_IDS = ("osac-cli", "osac-ui", "osac-admin", "osac-ui-backend", "osac-csi-driver")
+
 
 class FakeKeycloak(ThreadingHTTPServer):
     daemon_threads = True
@@ -35,8 +37,11 @@ class FakeKeycloak(ThreadingHTTPServer):
                 "clientId": "https://mcp.example.test/",
                 "defaultClientScopeIds": [],
             }
+        ] + [
+            {"id": f"{client_id}-id", "clientId": client_id, "defaultClientScopeIds": []}
+            for client_id in API_CLIENT_IDS
         ]
-        self.fail_scope_assignment = False
+        self.fail_scope_assignment: str | None = None
         self.scope_creates = 0
         self.mapper_creates = 0
         self.client_creates = 0
@@ -141,10 +146,10 @@ class FakeKeycloakHandler(BaseHTTPRequestHandler):
             else:
                 self._reply(404)
         elif len(parts) == 7 and parts[3] == "clients" and parts[5] == "default-client-scopes":
-            if self.state.fail_scope_assignment:
+            client = next((item for item in self.state.clients if item.get("id") == parts[4]), None)
+            if client and client.get("clientId") == self.state.fail_scope_assignment:
                 self._reply(403, {"error": "forbidden"})
                 return
-            client = next((item for item in self.state.clients if item.get("id") == parts[4]), None)
             if client and parts[6] not in client["defaultClientScopeIds"]:
                 client["defaultClientScopeIds"].append(parts[6])
             self._reply(204 if client else 404)
@@ -153,7 +158,7 @@ class FakeKeycloakHandler(BaseHTTPRequestHandler):
 
 
 class KeycloakReconciliationTest(unittest.TestCase):
-    def start_keycloak(self, *, fail_scope_assignment: bool = False) -> tuple[FakeKeycloak, str]:
+    def start_keycloak(self, *, fail_scope_assignment: str | None = None) -> tuple[FakeKeycloak, str]:
         server = FakeKeycloak()
         server.fail_scope_assignment = fail_scope_assignment
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -166,6 +171,11 @@ class KeycloakReconciliationTest(unittest.TestCase):
 
         self.addCleanup(stop_server)
         return server, f"http://127.0.0.1:{server.server_port}"
+
+    def assert_api_clients_have_scope(self, server: FakeKeycloak) -> None:
+        for client_id in API_CLIENT_IDS:
+            client = next(item for item in server.clients if item["clientId"] == client_id)
+            self.assertEqual(client["defaultClientScopeIds"], ["scope-osac-api"], client_id)
 
     def reconcile(self, keycloak_url: str, *, client_id: str = "https://mcp.example.test/") -> None:
         RECONCILER.reconcile(keycloak_url, "admin", "password", client_id, "exchange-secret")
@@ -181,26 +191,43 @@ class KeycloakReconciliationTest(unittest.TestCase):
         self.assertEqual(len(server.scopes), 1)
         self.assertEqual(len(server.scopes[0]["protocolMappers"]), 1)
         mapper = server.scopes[0]["protocolMappers"][0]
-        self.assertEqual(mapper["name"], "osac-api-audience")
+        self.assertEqual(mapper["name"], RECONCILER.AUDIENCE_MAPPER["name"])
         self.assertEqual(mapper["config"]["included.custom.audience"], "osac-api")
         self.assertEqual(server.clients[0]["defaultClientScopeIds"], ["scope-osac-api"])
+        self.assert_api_clients_have_scope(server)
 
     def test_missing_exchange_client_is_created_and_assigned_scope(self) -> None:
         server, keycloak_url = self.start_keycloak()
-        server.clients.clear()
+        server.clients = [client for client in server.clients if client["clientId"] in API_CLIENT_IDS]
 
         self.reconcile(keycloak_url)
 
         self.assertEqual(server.client_creates, 1)
-        self.assertEqual(server.clients[0]["defaultClientScopeIds"], ["scope-osac-api"])
+        exchange_client = next(item for item in server.clients if item["clientId"] == "https://mcp.example.test/")
+        self.assertEqual(exchange_client["defaultClientScopeIds"], ["scope-osac-api"])
+        self.assert_api_clients_have_scope(server)
 
-    def test_scope_only_installation_does_not_change_clients(self) -> None:
+    def test_scope_only_installation_restores_api_client_assignments(self) -> None:
         server, keycloak_url = self.start_keycloak()
 
         RECONCILER.reconcile(keycloak_url, "admin", "password")
 
         self.assertEqual(server.scope_creates, 1)
         self.assertEqual(server.clients[0]["defaultClientScopeIds"], [])
+        self.assert_api_clients_have_scope(server)
+
+    def test_existing_bundled_scope_mapper_is_not_duplicated(self) -> None:
+        server, keycloak_url = self.start_keycloak()
+        realm = json.loads((INSTALLER / "charts/osac-infra/files/realm.json").read_text(encoding="utf-8"))
+        scope = next(item for item in realm["clientScopes"] if item["name"] == RECONCILER.SCOPE_NAME)
+        scope["id"] = "scope-osac-api"
+        server.scopes.append(scope)
+
+        self.reconcile(keycloak_url)
+
+        self.assertEqual(server.mapper_creates, 0)
+        self.assertEqual(len(scope["protocolMappers"]), 1)
+        self.assertEqual(scope["protocolMappers"][0]["name"], RECONCILER.AUDIENCE_MAPPER["name"])
 
     def test_existing_incorrect_audience_mapper_is_repaired(self) -> None:
         server, keycloak_url = self.start_keycloak()
@@ -213,7 +240,7 @@ class KeycloakReconciliationTest(unittest.TestCase):
                 "protocolMappers": [
                     {
                         "id": "audience-mapper",
-                        "name": "osac-api-audience",
+                        "name": RECONCILER.AUDIENCE_MAPPER["name"],
                         "protocol": "openid-connect",
                         "protocolMapper": "oidc-audience-mapper",
                         "consentRequired": False,
@@ -230,6 +257,7 @@ class KeycloakReconciliationTest(unittest.TestCase):
             server.scopes[0]["protocolMappers"][0]["config"]["included.custom.audience"],
             "osac-api",
         )
+        self.assert_api_clients_have_scope(server)
 
     def test_existing_incorrect_scope_is_repaired(self) -> None:
         server, keycloak_url = self.start_keycloak()
@@ -248,11 +276,15 @@ class KeycloakReconciliationTest(unittest.TestCase):
         self.assertEqual(server.scopes[0]["id"], "scope-osac-api")
         self.assertEqual(server.scopes[0]["protocol"], "openid-connect")
         self.assertEqual(server.scopes[0]["attributes"], RECONCILER.SCOPE_ATTRIBUTES)
+        self.assert_api_clients_have_scope(server)
 
     def test_assignment_failure_is_actionable(self) -> None:
-        _, keycloak_url = self.start_keycloak(fail_scope_assignment=True)
+        _, keycloak_url = self.start_keycloak(fail_scope_assignment="https://mcp.example.test/")
 
-        with self.assertRaisesRegex(RECONCILER.KeycloakError, "could not assign osac-api.*HTTP 403"):
+        with self.assertRaisesRegex(
+            RECONCILER.KeycloakError,
+            "could not assign osac-api.*MCP exchange client.*HTTP 403",
+        ):
             self.reconcile(keycloak_url)
 
     def test_keycloak_chart_embeds_and_runs_the_reconciler(self) -> None:

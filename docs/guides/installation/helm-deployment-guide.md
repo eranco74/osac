@@ -170,7 +170,10 @@ helm upgrade --install osac ./charts/osac \
 When bundled Keycloak is enabled, the `osac-infra` chart creates or repairs
 the `osac-api` client scope and its audience mapper in the `osac` realm on
 install and upgrade. This repairs an existing realm in place and does not
-depend on `keycloak.realmOverwrite`. Without development fixtures, the
+depend on `keycloak.realmOverwrite`. Reconciliation also restores the
+`osac-api` default-scope assignments for the first-party API clients defined in
+the realm configuration, because deleting and recreating the scope removes its
+existing client links. Without development fixtures, the
 `keycloak-reconcile-mcp-scope` hook reconciles the scope. With development
 fixtures, `keycloak-set-passwords` performs that reconciliation and assigns the
 scope as a default scope on the MCP exchange client. If MCP token exchange
