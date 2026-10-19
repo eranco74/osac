@@ -355,9 +355,16 @@ class KeycloakReconciliationTest(unittest.TestCase):
             for doc in documents
             if doc.get("kind") == "ConfigMap" and doc.get("metadata", {}).get("name") == "keycloak-password-setup"
         )
+        password_script = password_config["data"]["set-passwords.sh"]
+        curl_commands = [line for line in password_script.splitlines() if "curl" in line]
+        self.assertTrue(curl_commands)
+        for curl_command in curl_commands:
+            self.assertNotRegex(curl_command, r"(^|\s)-k(\s|$)")
+            self.assertNotIn("--insecure", curl_command)
+            self.assertIn('--cacert "${KEYCLOAK_CA_PATH}"', curl_command)
         self.assertIn(
             "python3 /mcp-reconciler/reconcile_mcp_exchange_client.py",
-            password_config["data"]["set-passwords.sh"],
+            password_script,
         )
         self.assertEqual(password_job["spec"]["template"]["spec"]["automountServiceAccountToken"], False)
         self.assertIn("runAsNonRoot", password_job["spec"]["template"]["spec"]["securityContext"])

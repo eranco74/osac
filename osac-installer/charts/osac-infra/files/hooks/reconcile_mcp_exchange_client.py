@@ -35,6 +35,7 @@ AUDIENCE_MAPPER = {
         "included.custom.audience": SCOPE_NAME,
     },
 }
+_HTTPS_CONTEXT: ssl.SSLContext | None = None
 DEFAULT_CLIENT_SCOPES = ["groups", "basic", "username", "organization", "roles", SCOPE_NAME]
 # Keep these clients aligned with the osac-api default scopes in realm.json. When
 # the scope is deleted and recreated, Keycloak drops its existing client links.
@@ -70,11 +71,15 @@ def _open_request(
 
 
 def _https_context() -> ssl.SSLContext:
+    global _HTTPS_CONTEXT
+    if _HTTPS_CONTEXT is not None:
+        return _HTTPS_CONTEXT
     ca_path = os.environ.get("KEYCLOAK_CA_PATH")
     if not ca_path:
         raise KeycloakError("KEYCLOAK_CA_PATH is required for HTTPS Keycloak requests")
     try:
-        return ssl.create_default_context(cafile=ca_path)
+        _HTTPS_CONTEXT = ssl.create_default_context(cafile=ca_path)
+        return _HTTPS_CONTEXT
     except (OSError, ssl.SSLError) as error:
         raise KeycloakError(f"could not load the Keycloak CA certificate from {ca_path}: {error}") from None
 
@@ -200,6 +205,7 @@ def _ensure_scope(keycloak_url: str, token: str) -> dict[str, Any]:
     mappers = _list(admin_request(keycloak_url, token, "GET", mappers_path), "protocol mapper")
     mapper = _find_audience_mapper(mappers)
     mapper_payload = dict(AUDIENCE_MAPPER)
+    mapper_was_current = mapper is not None and _audience_mapper_is_current(mapper)
     if mapper is None:
         try:
             admin_request(keycloak_url, token, "POST", mappers_path, mapper_payload)
@@ -221,10 +227,13 @@ def _ensure_scope(keycloak_url: str, token: str) -> dict[str, Any]:
                 f"permissions: {error}"
             ) from None
 
-    mappers = _list(admin_request(keycloak_url, token, "GET", mappers_path), "protocol mapper")
-    mapper = _find_audience_mapper(mappers)
-    if mapper is None or not _audience_mapper_is_current(mapper):
-        raise KeycloakError(f"the {SCOPE_NAME} audience mapper is not configured to issue the required API audience")
+    if not mapper_was_current:
+        mappers = _list(admin_request(keycloak_url, token, "GET", mappers_path), "protocol mapper")
+        mapper = _find_audience_mapper(mappers)
+        if mapper is None or not _audience_mapper_is_current(mapper):
+            raise KeycloakError(
+                f"the {SCOPE_NAME} audience mapper is not configured to issue the required API audience"
+            )
     return scope
 
 
@@ -234,11 +243,13 @@ def _ensure_default_scope_assignment(
     scope: dict[str, Any],
     client_id: str,
     client_description: str,
+    client: dict[str, Any] | None = None,
 ) -> None:
     clients_path = f"/admin/realms/{REALM}/clients"
-    query = urllib.parse.urlencode({"clientId": client_id})
-    clients = _list(admin_request(keycloak_url, token, "GET", f"{clients_path}?{query}"), "client")
-    client = _find_client(clients, client_id)
+    if client is None:
+        query = urllib.parse.urlencode({"clientId": client_id})
+        clients = _list(admin_request(keycloak_url, token, "GET", f"{clients_path}?{query}"), "client")
+        client = _find_client(clients, client_id)
     if client is None or not isinstance(client.get("id"), str) or not client["id"]:
         raise KeycloakError(f"Keycloak did not expose {client_description} while assigning {SCOPE_NAME}")
 
@@ -319,7 +330,6 @@ def _ensure_exchange_client(
             admin_request(keycloak_url, token, "PUT", f"{clients_path}/{client_id}", client_payload)
         except KeycloakError as error:
             raise KeycloakError(f"could not update the MCP exchange client: {error}") from None
-        client = find_client()
     if client is None or not isinstance(client.get("id"), str) or not client["id"]:
         raise KeycloakError("Keycloak did not expose the MCP exchange client after reconciliation")
 
@@ -329,6 +339,7 @@ def _ensure_exchange_client(
         scope,
         resource_url,
         f"MCP exchange client '{resource_url}'",
+        client,
     )
 
 
