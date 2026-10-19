@@ -168,7 +168,16 @@ var _ = Describe("deployed MCP server", func() {
 		defer cancel()
 
 		wrongResource := endpoint + "/different/"
-		token, err := tool.SimulateMCPLogin(ctx, wrongResource, userUsername, usersPassword)
+		wrongResourceClientID, err := createKeycloakMCPResourceClient(ctx, wrongResource)
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(func() {
+			Expect(deleteKeycloakClient(context.Background(), wrongResourceClientID)).To(Succeed())
+		})
+
+		token, err := tool.simulateOIDCLogin(
+			ctx, wrongResource, "http://localhost:8091/callback", wrongResource, "",
+			userUsername, usersPassword,
+		)
 		Expect(err).ToNot(HaveOccurred())
 		claims, err := parseJWTClaims(token)
 		Expect(err).ToNot(HaveOccurred())
@@ -285,16 +294,24 @@ var _ = Describe("deployed MCP server", func() {
 		})
 
 		Expect(setKeycloakReplicas(ctx, 0)).To(Succeed())
+		selector := metav1.FormatLabelSelector(deployment.Spec.Selector)
 		Eventually(func(g Gomega) {
 			current, err := deploymentClient.Get(ctx, "keycloak-service", metav1.GetOptions{})
 			g.Expect(err).ToNot(HaveOccurred())
 			g.Expect(current.Status.ReadyReplicas).To(Equal(int32(0)))
+			pods, err := tool.KubeClientSet().CoreV1().Pods("keycloak").List(
+				ctx, metav1.ListOptions{LabelSelector: selector},
+			)
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(pods.Items).To(BeEmpty())
 		}, time.Minute, time.Second).Should(Succeed())
 
-		_, err = callDeployedMCPTool[mcpserver.CheckConnectionOutput](
-			ctx, endpoint, token, "check_connection", mcpserver.CheckConnectionInput{},
-		)
-		expectMCPToolError(err, "service_unavailable", "Unavailable", true)
+		Eventually(func(g Gomega) {
+			_, err = callDeployedMCPTool[mcpserver.CheckConnectionOutput](
+				ctx, endpoint, token, "check_connection", mcpserver.CheckConnectionInput{},
+			)
+			expectMCPToolErrorWithGomega(g, err, "service_unavailable", "Unavailable", true)
+		}, 45*time.Second, time.Second).Should(Succeed())
 	})
 })
 
@@ -417,6 +434,57 @@ func getKeycloakClient(ctx context.Context, clientID string) (string, map[string
 	return id, clients[0], nil
 }
 
+func createKeycloakMCPResourceClient(ctx context.Context, resourceURL string) (string, error) {
+	payload := map[string]any{
+		"clientId":                  resourceURL,
+		"name":                      "OSAC MCP wrong-resource test client",
+		"enabled":                   true,
+		"protocol":                  "openid-connect",
+		"publicClient":              true,
+		"standardFlowEnabled":       true,
+		"directAccessGrantsEnabled": false,
+		"serviceAccountsEnabled":    false,
+		"fullScopeAllowed":          true,
+		"redirectUris":              []string{"http://localhost:8091/callback"},
+		"defaultClientScopes":       []string{"groups", "basic", "username", "organization", "roles", "osac-api"},
+		"attributes": map[string]string{
+			"standard.token.exchange.enabled": "true",
+			"resource_url":                    resourceURL,
+		},
+		"protocolMappers": []map[string]any{{
+			"name":            "wrong-resource-audience",
+			"protocol":        "openid-connect",
+			"protocolMapper":  "oidc-audience-mapper",
+			"consentRequired": false,
+			"config": map[string]string{
+				"included.client.audience": resourceURL,
+				"id.token.claim":           "false",
+				"access.token.claim":       "true",
+			},
+		}},
+	}
+	code, body, err := tool.KeycloakAdminRequest(ctx, http.MethodPost, "/clients", payload)
+	if err != nil {
+		return "", err
+	}
+	if code != http.StatusCreated {
+		return "", fmt.Errorf("create Keycloak resource client: HTTP %d: %s", code, string(body))
+	}
+	clientID, _, err := getKeycloakClient(ctx, resourceURL)
+	return clientID, err
+}
+
+func deleteKeycloakClient(ctx context.Context, clientID string) error {
+	code, body, err := tool.KeycloakAdminRequest(ctx, http.MethodDelete, "/clients/"+clientID, nil)
+	if err != nil {
+		return err
+	}
+	if code != http.StatusNoContent && code != http.StatusNotFound {
+		return fmt.Errorf("delete Keycloak client: HTTP %d: %s", code, string(body))
+	}
+	return nil
+}
+
 func cloneJSONMap(original map[string]any) (map[string]any, error) {
 	encoded, err := json.Marshal(original)
 	if err != nil {
@@ -441,19 +509,23 @@ func updateKeycloakClient(ctx context.Context, clientID string, client map[strin
 }
 
 func expectMCPToolError(err error, category, grpcCode string, retryable bool) {
-	Expect(err).To(HaveOccurred())
+	expectMCPToolErrorWithGomega(Default, err, category, grpcCode, retryable)
+}
+
+func expectMCPToolErrorWithGomega(g Gomega, err error, category, grpcCode string, retryable bool) {
+	g.Expect(err).To(HaveOccurred())
 	message := err.Error()
 	jsonStart := strings.Index(message, "{")
-	Expect(jsonStart).To(BeNumerically(">=", 0), message)
+	g.Expect(jsonStart).To(BeNumerically(">=", 0), message)
 	var envelope struct {
 		Category  string `json:"category"`
 		GRPCCode  string `json:"grpc_code"`
 		Retryable bool   `json:"retryable"`
 	}
-	Expect(json.Unmarshal([]byte(message[jsonStart:]), &envelope)).To(Succeed())
-	Expect(envelope.Category).To(Equal(category))
-	Expect(envelope.GRPCCode).To(Equal(grpcCode))
-	Expect(envelope.Retryable).To(Equal(retryable))
+	g.Expect(json.Unmarshal([]byte(message[jsonStart:]), &envelope)).To(Succeed())
+	g.Expect(envelope.Category).To(Equal(category))
+	g.Expect(envelope.GRPCCode).To(Equal(grpcCode))
+	g.Expect(envelope.Retryable).To(Equal(retryable))
 }
 
 func setKeycloakReplicas(ctx context.Context, replicas int32) error {
