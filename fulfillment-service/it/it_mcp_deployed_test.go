@@ -128,7 +128,12 @@ var _ = Describe("deployed MCP server", func() {
 		Expect(err).ToNot(HaveOccurred())
 		shortLived, err := cloneJSONMap(original)
 		Expect(err).ToNot(HaveOccurred())
-		shortLived["accessTokenLifespan"] = 1
+		attributes, ok := shortLived["attributes"].(map[string]interface{})
+		if !ok {
+			attributes = make(map[string]interface{})
+			shortLived["attributes"] = attributes
+		}
+		attributes["access.token.lifespan"] = "1"
 		Expect(updateKeycloakClient(ctx, clientID, shortLived)).To(Succeed())
 		DeferCleanup(func() {
 			Expect(updateKeycloakClient(context.Background(), clientID, original)).To(Succeed())
