@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -13,6 +14,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 from typing import Any
+from unittest.mock import patch
 
 
 INSTALLER = pathlib.Path(__file__).resolve().parents[1]
@@ -45,6 +47,7 @@ class FakeKeycloak(ThreadingHTTPServer):
         self.scope_creates = 0
         self.mapper_creates = 0
         self.client_creates = 0
+        self.scope_assignment_puts = 0
 
 
 class FakeKeycloakHandler(BaseHTTPRequestHandler):
@@ -147,6 +150,8 @@ class FakeKeycloakHandler(BaseHTTPRequestHandler):
                 self._reply(404)
         elif len(parts) == 7 and parts[3] == "clients" and parts[5] == "default-client-scopes":
             client = next((item for item in self.state.clients if item.get("id") == parts[4]), None)
+            if client:
+                self.state.scope_assignment_puts += 1
             if client and client.get("clientId") == self.state.fail_scope_assignment:
                 self._reply(403, {"error": "forbidden"})
                 return
@@ -215,6 +220,19 @@ class KeycloakReconciliationTest(unittest.TestCase):
         self.assertEqual(server.scope_creates, 1)
         self.assertEqual(server.clients[0]["defaultClientScopeIds"], [])
         self.assert_api_clients_have_scope(server)
+
+    def test_existing_scope_assignments_are_not_rewritten(self) -> None:
+        server, keycloak_url = self.start_keycloak()
+
+        self.reconcile(keycloak_url)
+        self.reconcile(keycloak_url)
+
+        self.assertEqual(server.scope_assignment_puts, len(API_CLIENT_IDS) + 1)
+
+    def test_https_requires_a_configured_ca(self) -> None:
+        with patch.dict(os.environ, {"KEYCLOAK_CA_PATH": ""}):
+            with self.assertRaisesRegex(RECONCILER.KeycloakError, "KEYCLOAK_CA_PATH is required"):
+                self.reconcile("https://keycloak:443")
 
     def test_existing_bundled_scope_mapper_is_not_duplicated(self) -> None:
         server, keycloak_url = self.start_keycloak()
@@ -309,9 +327,13 @@ class KeycloakReconciliationTest(unittest.TestCase):
             "--values",
             str(INSTALLER / "values/dev/kind-infra.yaml"),
         ]
-        rendered = subprocess.run(command, check=False, capture_output=True, text=True)
-        self.assertEqual(rendered.returncode, 0, rendered.stderr)
-        documents = [doc for doc in yaml.safe_load_all(rendered.stdout) if isinstance(doc, dict)]
+
+        def render_documents(extra_args: list[str] | None = None) -> list[dict[str, Any]]:
+            rendered = subprocess.run([*command, *(extra_args or [])], check=False, capture_output=True, text=True)
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            return [doc for doc in yaml.safe_load_all(rendered.stdout) if isinstance(doc, dict)]
+
+        documents = render_documents()
         config_map = next(
             doc
             for doc in documents
@@ -337,15 +359,13 @@ class KeycloakReconciliationTest(unittest.TestCase):
             "python3 /mcp-reconciler/reconcile_mcp_exchange_client.py",
             password_config["data"]["set-passwords.sh"],
         )
+        self.assertEqual(password_job["spec"]["template"]["spec"]["automountServiceAccountToken"], False)
+        self.assertIn("runAsNonRoot", password_job["spec"]["template"]["spec"]["securityContext"])
+        password_container = password_job["spec"]["template"]["spec"]["containers"][0]
+        self.assertIn("KEYCLOAK_CA_PATH", {item["name"] for item in password_container["env"]})
+        self.assertIn("keycloak-tls", {item["name"] for item in password_container["volumeMounts"]})
 
-        no_fixtures = subprocess.run(
-            [*command, "--set", "keycloak.devFixtures.enabled=false"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(no_fixtures.returncode, 0, no_fixtures.stderr)
-        no_fixture_documents = [doc for doc in yaml.safe_load_all(no_fixtures.stdout) if isinstance(doc, dict)]
+        no_fixture_documents = render_documents(["--set", "keycloak.devFixtures.enabled=false"])
         self.assertTrue(
             any(
                 doc.get("kind") == "Job"
@@ -359,6 +379,16 @@ class KeycloakReconciliationTest(unittest.TestCase):
             if doc.get("kind") == "Job" and doc.get("metadata", {}).get("name") == "keycloak-reconcile-mcp-scope"
         )
         self.assertEqual(scope_job["metadata"]["annotations"]["helm.sh/hook-weight"], "16")
+        scope_pod = scope_job["spec"]["template"]["spec"]
+        self.assertEqual(scope_pod["automountServiceAccountToken"], False)
+        self.assertIn("runAsNonRoot", scope_pod["securityContext"])
+        scope_container = scope_pod["containers"][0]
+        self.assertIn("KEYCLOAK_CA_PATH", {item["name"] for item in scope_container["env"]})
+        self.assertIn("keycloak-tls", {item["name"] for item in scope_container["volumeMounts"]})
+        self.assertIn(
+            "keycloak-tls",
+            {item["name"] for item in scope_pod["volumes"]},
+        )
         self.assertFalse(
             any(
                 doc.get("kind") == "Job" and doc.get("metadata", {}).get("name") == "keycloak-set-passwords"

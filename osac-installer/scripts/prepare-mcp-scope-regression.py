@@ -10,6 +10,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -67,7 +68,22 @@ def port_forward() -> tuple[subprocess.Popen[bytes], str]:
         stderr=subprocess.DEVNULL,
     )
     base_url = f"https://127.0.0.1:{local_port}"
-    context = ssl._create_unverified_context()
+    ca_data = run([
+        "kubectl",
+        "-n",
+        "keycloak",
+        "get",
+        "secret",
+        "keycloak-tls-cert",
+        "-o",
+        "jsonpath={.data.ca\\.crt}",
+    ])
+    with tempfile.NamedTemporaryFile() as ca_file:
+        ca_file.write(base64.b64decode(ca_data, validate=True))
+        ca_file.flush()
+        context = ssl.create_default_context(cafile=ca_file.name)
+        context.check_hostname = False
+        reconciler._https_context = lambda: context
     for _ in range(30):
         if process.poll() is not None:
             process.wait()
@@ -97,11 +113,7 @@ def remove_scope(keycloak_url: str, username: str, password: str) -> None:
         (item for item in mappers if item.get("name") == reconciler.AUDIENCE_MAPPER["name"]),
         None,
     ) if isinstance(mappers, list) else None
-    if (
-        not audience_mapper
-        or audience_mapper.get("config", {}).get("included.custom.audience")
-        != reconciler.AUDIENCE_MAPPER["config"]["included.custom.audience"]
-    ):
+    if not audience_mapper or not reconciler._audience_mapper_is_current(audience_mapper):
         raise RuntimeError("the local Kind realm does not have the expected osac-api audience mapper before the test")
 
     reconciler.admin_request(

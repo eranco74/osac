@@ -561,6 +561,9 @@ spec:
   template:
     spec:
       restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "osac-infra.cliJobPodSecurityContext" . | nindent 8 }}
       containers:
       - name: reconcile-mcp-scope
         image: {{ .Values.cliImage }}
@@ -570,6 +573,8 @@ spec:
           value: "1"
         - name: KEYCLOAK_URL
           value: https://keycloak:443
+        - name: KEYCLOAK_CA_PATH
+          value: /secrets/keycloak-tls/ca.crt
         - name: ADMIN_USERNAME
           valueFrom:
             secretKeyRef:
@@ -597,10 +602,20 @@ spec:
         - name: mcp-reconciler
           mountPath: /mcp-reconciler
           readOnly: true
+        - name: keycloak-tls
+          mountPath: /secrets/keycloak-tls
+          readOnly: true
       volumes:
       - name: mcp-reconciler
         configMap:
           name: keycloak-mcp-reconciler
+          defaultMode: 0444
+      - name: keycloak-tls
+        secret:
+          secretName: keycloak-tls-cert
+          items:
+          - key: ca.crt
+            path: ca.crt
           defaultMode: 0444
 {{- end }}
 {{- if .Values.keycloak.devFixtures.enabled }}
@@ -658,10 +673,6 @@ data:
         -H "Authorization: Bearer ${token}"
     }
 
-    ensure_mcp_exchange_client() {
-      python3 /mcp-reconciler/reconcile_mcp_exchange_client.py
-    }
-
     set_password() {
       local username=$1
       local password=$2
@@ -704,7 +715,7 @@ data:
     set_password "your_user" "${DEFAULT_USER_PASSWORD}"
 
     echo "All demo-user passwords set"
-    ensure_mcp_exchange_client
+    python3 /mcp-reconciler/reconcile_mcp_exchange_client.py
     ensure_mcp_client
 ---
 apiVersion: batch/v1
@@ -725,6 +736,9 @@ spec:
   template:
     spec:
       restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "osac-infra.cliJobPodSecurityContext" . | nindent 8 }}
       containers:
       - name: set-passwords
         image: {{ .Values.cliImage }}
@@ -753,6 +767,8 @@ spec:
               key: default-user-password
         - name: MCP_RESOURCE_URL
           value: {{ .Values.keycloak.devFixtures.mcpResourceURL | quote }}
+        - name: KEYCLOAK_CA_PATH
+          value: /secrets/keycloak-tls/ca.crt
         - name: MCP_EXCHANGE_SECRET
           valueFrom:
             secretKeyRef:
@@ -780,6 +796,9 @@ spec:
         - name: mcp-reconciler
           mountPath: /mcp-reconciler
           readOnly: true
+        - name: keycloak-tls
+          mountPath: /secrets/keycloak-tls
+          readOnly: true
         - name: tmp
           mountPath: /tmp
       volumes:
@@ -793,6 +812,13 @@ spec:
       - name: mcp-reconciler
         configMap:
           name: keycloak-mcp-reconciler
+          defaultMode: 0444
+      - name: keycloak-tls
+        secret:
+          secretName: keycloak-tls-cert
+          items:
+          - key: ca.crt
+            path: ca.crt
           defaultMode: 0444
       - name: tmp
         emptyDir: {}

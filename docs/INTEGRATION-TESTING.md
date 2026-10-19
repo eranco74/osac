@@ -247,9 +247,10 @@ to the profile's configured CA and enabled services.
 
 The `make mcp-keycloak-test` unit suite uses a local fake Keycloak Admin API to
 verify missing-scope creation, audience-mapper configuration, client-scope
-assignment, idempotency, and actionable assignment failure. When Helm is
-available, it also checks the rendered chart resources. It does not prove a
-real token exchange. For that boundary, run
+assignment, idempotency, fail-closed HTTPS CA configuration, and actionable
+assignment failure. When Helm is available, it also checks the rendered chart
+resources, including the CA mount and hardened hook pod spec. It does not prove
+a real token exchange. For that boundary, run
 `MCP_TEST_ENABLED=true make test PLATFORM=kind PROFILE=dev NS=osac
 SUITE=fulfillment` from `osac-installer` against the dedicated local Kind
 cluster. The opt-in setup removes `osac-api` from the existing Keycloak realm,

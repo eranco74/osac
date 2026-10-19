@@ -54,7 +54,7 @@ def _open_request(
     request = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
     options: dict[str, Any] = {"timeout": 30}
     if url.startswith("https://"):
-        options["context"] = ssl._create_unverified_context()
+        options["context"] = _https_context()
     try:
         with urllib.request.urlopen(request, **options) as response:
             return response.read()
@@ -67,6 +67,16 @@ def _open_request(
         raise KeycloakError(f"could not reach Keycloak at {host}: {error.reason}") from None
     except (TimeoutError, OSError) as error:
         raise KeycloakError(f"could not reach Keycloak at {urllib.parse.urlsplit(url).netloc}: {error}") from None
+
+
+def _https_context() -> ssl.SSLContext:
+    ca_path = os.environ.get("KEYCLOAK_CA_PATH")
+    if not ca_path:
+        raise KeycloakError("KEYCLOAK_CA_PATH is required for HTTPS Keycloak requests")
+    try:
+        return ssl.create_default_context(cafile=ca_path)
+    except (OSError, ssl.SSLError) as error:
+        raise KeycloakError(f"could not load the Keycloak CA certificate from {ca_path}: {error}") from None
 
 
 def _decode_json(body: bytes, description: str) -> Any:
@@ -117,6 +127,18 @@ def _list(response: Any, description: str) -> list[dict[str, Any]]:
     return response
 
 
+def _find_scope(scopes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next((item for item in scopes if item.get("name") == SCOPE_NAME), None)
+
+
+def _find_client(clients: list[dict[str, Any]], client_id: str) -> dict[str, Any] | None:
+    return next((item for item in clients if item.get("clientId") == client_id), None)
+
+
+def _find_audience_mapper(mappers: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next((item for item in mappers if item.get("name") == AUDIENCE_MAPPER["name"]), None)
+
+
 def _scope_is_current(scope: dict[str, Any]) -> bool:
     attributes = scope.get("attributes")
     return (
@@ -140,7 +162,7 @@ def _audience_mapper_is_current(mapper: dict[str, Any]) -> bool:
 def _ensure_scope(keycloak_url: str, token: str) -> dict[str, Any]:
     scopes_path = f"/admin/realms/{REALM}/client-scopes"
     scopes = _list(admin_request(keycloak_url, token, "GET", scopes_path), "client scope")
-    scope = next((item for item in scopes if item.get("name") == SCOPE_NAME), None)
+    scope = _find_scope(scopes)
     scope_payload = {
         "name": SCOPE_NAME,
         "description": "OSAC API",
@@ -155,7 +177,7 @@ def _ensure_scope(keycloak_url: str, token: str) -> dict[str, Any]:
                 f"could not create the {SCOPE_NAME} client scope; verify Keycloak realm-management permissions: {error}"
             ) from None
         scopes = _list(admin_request(keycloak_url, token, "GET", scopes_path), "client scope")
-        scope = next((item for item in scopes if item.get("name") == SCOPE_NAME), None)
+        scope = _find_scope(scopes)
     if scope is None or not isinstance(scope.get("id"), str) or not scope["id"]:
         raise KeycloakError(f"Keycloak did not expose the {SCOPE_NAME} client scope after reconciliation")
     if not _scope_is_current(scope):
@@ -167,14 +189,7 @@ def _ensure_scope(keycloak_url: str, token: str) -> dict[str, Any]:
             raise KeycloakError(
                 f"could not update the {SCOPE_NAME} client scope; verify Keycloak realm-management permissions: {error}"
             ) from None
-        scope = next(
-            (
-                item
-                for item in _list(admin_request(keycloak_url, token, "GET", scopes_path), "client scope")
-                if item.get("name") == SCOPE_NAME
-            ),
-            None,
-        )
+        scope = _find_scope(_list(admin_request(keycloak_url, token, "GET", scopes_path), "client scope"))
         if scope is None or not _scope_is_current(scope):
             raise KeycloakError(
                 f"the {SCOPE_NAME} client scope is not configured for OpenID Connect after reconciliation"
@@ -183,7 +198,7 @@ def _ensure_scope(keycloak_url: str, token: str) -> dict[str, Any]:
     scope_id = urllib.parse.quote(scope["id"], safe="")
     mappers_path = f"{scopes_path}/{scope_id}/protocol-mappers/models"
     mappers = _list(admin_request(keycloak_url, token, "GET", mappers_path), "protocol mapper")
-    mapper = next((item for item in mappers if item.get("name") == AUDIENCE_MAPPER["name"]), None)
+    mapper = _find_audience_mapper(mappers)
     mapper_payload = dict(AUDIENCE_MAPPER)
     if mapper is None:
         try:
@@ -207,7 +222,7 @@ def _ensure_scope(keycloak_url: str, token: str) -> dict[str, Any]:
             ) from None
 
     mappers = _list(admin_request(keycloak_url, token, "GET", mappers_path), "protocol mapper")
-    mapper = next((item for item in mappers if item.get("name") == AUDIENCE_MAPPER["name"]), None)
+    mapper = _find_audience_mapper(mappers)
     if mapper is None or not _audience_mapper_is_current(mapper):
         raise KeycloakError(f"the {SCOPE_NAME} audience mapper is not configured to issue the required API audience")
     return scope
@@ -223,13 +238,20 @@ def _ensure_default_scope_assignment(
     clients_path = f"/admin/realms/{REALM}/clients"
     query = urllib.parse.urlencode({"clientId": client_id})
     clients = _list(admin_request(keycloak_url, token, "GET", f"{clients_path}?{query}"), "client")
-    client = next((item for item in clients if item.get("clientId") == client_id), None)
+    client = _find_client(clients, client_id)
     if client is None or not isinstance(client.get("id"), str) or not client["id"]:
         raise KeycloakError(f"Keycloak did not expose {client_description} while assigning {SCOPE_NAME}")
 
     client_uuid = urllib.parse.quote(client["id"], safe="")
     scope_uuid = urllib.parse.quote(scope["id"], safe="")
     assignment_path = f"{clients_path}/{client_uuid}/default-client-scopes/{scope_uuid}"
+    default_scopes = _list(
+        admin_request(keycloak_url, token, "GET", f"{clients_path}/{client_uuid}/default-client-scopes"),
+        "default client scope",
+    )
+    if any(item.get("id") == scope["id"] and item.get("name") == SCOPE_NAME for item in default_scopes):
+        return
+
     try:
         admin_request(keycloak_url, token, "PUT", assignment_path)
     except KeycloakError as error:
@@ -262,7 +284,8 @@ def _ensure_exchange_client(
 
     def find_client() -> dict[str, Any] | None:
         clients = _list(admin_request(keycloak_url, token, "GET", f"{clients_path}?{query}"), "client")
-        return next((client for client in clients if client.get("clientId") == resource_url), None)
+        return _find_client(clients, resource_url)
+
 
     client_payload = {
         "clientId": resource_url,
