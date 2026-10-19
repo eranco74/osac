@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	. "github.com/onsi/ginkgo/v2/dsl/core"
 	. "github.com/onsi/gomega"
@@ -65,10 +66,15 @@ var _ = Describe("deployed MCP server", func() {
 		})
 		Expect(err).ToNot(HaveOccurred())
 
-		// The regular Fulfillment API token has a different audience and must not
-		// be accepted by the MCP listener.
+		// Reconciliation must preserve the osac-api audience for normal CLI tokens.
 		apiToken, err := tool.UserTokenSource().Token(ctx)
 		Expect(err).ToNot(HaveOccurred())
+		claims := &jwt.RegisteredClaims{}
+		_, _, err = jwt.NewParser().ParseUnverified(apiToken.Access, claims)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(claims.Audience).To(ContainElement("osac-api"))
+
+		// The regular API token still must not be accepted by the MCP listener.
 		wrongAudienceReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader("{}"))
 		Expect(err).ToNot(HaveOccurred())
 		wrongAudienceReq.Header.Set("Authorization", "Bearer "+apiToken.Access)

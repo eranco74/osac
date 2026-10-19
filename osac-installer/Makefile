@@ -675,7 +675,7 @@ mce-render-test: helm-infra-deps ## Check disabled MCE defaults, explicit enable
 	uv run --project .. python scripts/test-mce-render.py
 
 .PHONY: mcp-keycloak-test
-mcp-keycloak-test: helm-topolvm-deps ## Test MCP Keycloak scope, mapper, assignment, and chart rendering
+mcp-keycloak-test: helm-infra-deps ## Test MCP Keycloak scope, mapper, assignment, and chart rendering
 	python3 scripts/test-mcp-keycloak-reconciliation.py
 
 .PHONY: fulfillment-auth-test
