@@ -676,6 +676,8 @@ mce-render-test: helm-infra-deps ## Check disabled MCE defaults, explicit enable
 
 .PHONY: mcp-keycloak-test
 mcp-keycloak-test: helm-infra-deps ## Test MCP Keycloak scope, mapper, assignment, and chart rendering
+	@command -v helm >/dev/null 2>&1 || { printf '%s\n' 'ERROR: helm is required for the MCP Keycloak chart-render test' >&2; exit 1; }
+	@python3 -c 'import yaml' >/dev/null 2>&1 || { printf '%s\n' 'ERROR: PyYAML is required for the MCP Keycloak chart-render test' >&2; exit 1; }
 	python3 scripts/test-mcp-keycloak-reconciliation.py
 
 .PHONY: fulfillment-auth-test
