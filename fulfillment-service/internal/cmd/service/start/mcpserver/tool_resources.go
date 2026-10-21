@@ -22,8 +22,6 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
 )
 
 type ResourceType string
@@ -50,12 +48,11 @@ type ListResourcesInput struct {
 }
 
 type ResourceSummary struct {
-	ID          string `json:"id"`
-	Name        string `json:"name,omitempty"`
-	Title       string `json:"title,omitempty"`
-	Description string `json:"description,omitempty"`
-	State       string `json:"state,omitempty"`
-	Type        string `json:"type,omitempty"`
+	ID      string `json:"id"`
+	Name    string `json:"name,omitempty"`
+	Version int32  `json:"version"`
+	State   string `json:"state,omitempty"`
+	Type    string `json:"type,omitempty"`
 }
 
 type ListResourcesOutput struct {
@@ -122,23 +119,13 @@ func handleGetResource(resources resourceRegistry) mcp.ToolHandlerFor[GetResourc
 		if err != nil {
 			return nil, GetResourceOutput{}, err
 		}
-		message, err := operations.get(ctx, input.ID)
+		summary, err := operations.get(ctx, input.ID)
 		if err != nil {
 			return nil, GetResourceOutput{}, safePublicAPIError(err)
 		}
-		resource, err := messageToMap(message)
+		resource, err := summaryToMap(summary)
 		if err != nil {
 			return nil, GetResourceOutput{}, safePublicAPIError(fmt.Errorf("failed to encode %s: %w", operations.label, err))
-		}
-		switch input.ResourceType {
-		case ResourceTypeComputeInstance:
-			if spec, ok := resource["spec"].(map[string]any); ok {
-				delete(spec, "userData")
-			}
-		case ResourceTypeComputeInstanceCatalogItem:
-			if fields, ok := resource["fields"].(map[string]any); ok {
-				delete(fields, "userData")
-			}
 		}
 		return nil, GetResourceOutput{Resource: resource}, nil
 	}
@@ -279,11 +266,8 @@ func supportedResourceTypesDescription(supportedResourceTypes []ResourceType) st
 	return strings.Join(resourceTypes, ", ")
 }
 
-func messageToMap(message proto.Message) (map[string]any, error) {
-	if message == nil {
-		return map[string]any{}, nil
-	}
-	encoded, err := protojson.Marshal(message)
+func summaryToMap(summary ResourceSummary) (map[string]any, error) {
+	encoded, err := json.Marshal(summary)
 	if err != nil {
 		return nil, err
 	}

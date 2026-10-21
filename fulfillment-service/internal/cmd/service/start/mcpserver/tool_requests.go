@@ -100,6 +100,16 @@ func safeMissingPrerequisiteError(kind, id string) error {
 	return envelope
 }
 
+func safeMissingReferenceError() error {
+	envelope := newToolError(
+		"not_found",
+		"NotFound",
+		"A required reference was not found. The dependent operation was not performed.",
+		false,
+	)
+	return envelope
+}
+
 func safeUnauthorizedPrerequisiteError(kind, id string) error {
 	envelope := newToolError(
 		"authorization",

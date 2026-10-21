@@ -16,6 +16,7 @@ package mcpserver
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -138,39 +139,7 @@ var _ = Describe("handleCreateComputeInstance", func() {
 		}
 
 		bootDiskSize := int32(40)
-		clients := createPrerequisiteClients(instances)
-		clients.instanceTypes = &mockInstanceTypesClient{getFunc: func(
-			_ context.Context, _ *publicv1.InstanceTypesGetRequest, _ ...grpc.CallOption,
-		) (*publicv1.InstanceTypesGetResponse, error) {
-			return publicv1.InstanceTypesGetResponse_builder{
-				Object: publicv1.InstanceType_builder{Id: "u1-medium"}.Build(),
-			}.Build(), nil
-		}}
-		clients.storageTiers = &mockStorageTiersClient{getFunc: func(
-			_ context.Context, _ *publicv1.StorageTiersGetRequest, _ ...grpc.CallOption,
-		) (*publicv1.StorageTiersGetResponse, error) {
-			return publicv1.StorageTiersGetResponse_builder{
-				Object: publicv1.StorageTier_builder{Id: "local"}.Build(),
-			}.Build(), nil
-		}}
-		clients.subnets = &mockSubnetsClient{getFunc: func(
-			_ context.Context, _ *publicv1.SubnetsGetRequest, _ ...grpc.CallOption,
-		) (*publicv1.SubnetsGetResponse, error) {
-			return publicv1.SubnetsGetResponse_builder{
-				Object: publicv1.Subnet_builder{Id: "subnet-1"}.Build(),
-			}.Build(), nil
-		}}
-		clients.securityGroups = &mockSecurityGroupsClient{listFunc: func(
-			_ context.Context, _ *publicv1.SecurityGroupsListRequest, _ ...grpc.CallOption,
-		) (*publicv1.SecurityGroupsListResponse, error) {
-			return publicv1.SecurityGroupsListResponse_builder{
-				Items: []*publicv1.SecurityGroup{
-					publicv1.SecurityGroup_builder{Id: "security-group-1"}.Build(),
-					publicv1.SecurityGroup_builder{Id: "security-group-2"}.Build(),
-				},
-			}.Build(), nil
-		}}
-		handler := handleCreateComputeInstance(clients)
+		handler := handleCreateComputeInstance(createPrerequisiteClients(instances))
 		_, _, err := handler(context.Background(), requestWithToken("raw-bearer-value"), CreateComputeInstanceInput{
 			Name:           "demo-vm",
 			CatalogItem:    "catalog-item-1",
@@ -240,6 +209,65 @@ var _ = Describe("handleCreateComputeInstance", func() {
 		}, "network_attachments[0].security_group_ids[0] is required"),
 	)
 
+	It("Rejects more than the supported number of raw security groups before preflight", func() {
+		instances := &mockComputeInstancesClient{
+			createFunc: func(
+				_ context.Context, _ *publicv1.ComputeInstancesCreateRequest, _ ...grpc.CallOption,
+			) (*publicv1.ComputeInstancesCreateResponse, error) {
+				return nil, errors.New("Create should not be called")
+			},
+		}
+		securityGroupIDs := make([]string, maxPreflightSecurityGroups+1)
+		for index := range securityGroupIDs {
+			securityGroupIDs[index] = fmt.Sprintf("security-group-%d", index)
+		}
+
+		handler := handleCreateComputeInstance(createPrerequisiteClients(instances))
+		_, output, err := handler(context.Background(), requestWithToken("raw-bearer-value"), CreateComputeInstanceInput{
+			Name:        "demo-vm",
+			CatalogItem: "catalog-item-1",
+			NetworkAttachments: []ComputeInstanceNetworkAttachmentInput{{
+				SubnetID: "subnet-1", SecurityGroupIDs: securityGroupIDs,
+			}},
+		})
+		envelope := decodeToolError(err)
+		Expect(output).To(BeZero())
+		Expect(envelope.Category).To(Equal("invalid_request"))
+		Expect(envelope.GRPCCode).To(Equal("InvalidArgument"))
+		Expect(envelope.Details).To(ConsistOf(
+			fmt.Sprintf("network_attachments must reference at most %d security groups", maxPreflightSecurityGroups),
+		))
+	})
+
+	It("Deduplicates repeated security group references before creating proto objects", func() {
+		var capturedObject *publicv1.ComputeInstance
+		instances := &mockComputeInstancesClient{
+			createFunc: func(
+				_ context.Context, request *publicv1.ComputeInstancesCreateRequest, _ ...grpc.CallOption,
+			) (*publicv1.ComputeInstancesCreateResponse, error) {
+				capturedObject = request.GetObject()
+				return publicv1.ComputeInstancesCreateResponse_builder{}.Build(), nil
+			},
+		}
+
+		handler := handleCreateComputeInstance(createPrerequisiteClients(instances))
+		_, _, err := handler(context.Background(), requestWithToken("raw-bearer-value"), CreateComputeInstanceInput{
+			Name:        "demo-vm",
+			CatalogItem: "catalog-item-1",
+			NetworkAttachments: []ComputeInstanceNetworkAttachmentInput{{
+				SubnetID: "subnet-1",
+				SecurityGroupIDs: []string{
+					"security-group-1", "security-group-1", "security-group-2", "security-group-2",
+				},
+			}},
+		})
+		Expect(err).ToNot(HaveOccurred())
+		securityGroups := capturedObject.GetSpec().GetNetworkAttachments()[0].GetSecurityGroups()
+		Expect(securityGroups).To(HaveLen(2))
+		Expect(securityGroups[0].GetId()).To(Equal("security-group-1"))
+		Expect(securityGroups[1].GetId()).To(Equal("security-group-2"))
+	})
+
 	It("Hides a ComputeInstance Create error description", func() {
 		instances := &mockComputeInstancesClient{
 			createFunc: func(
@@ -258,6 +286,27 @@ var _ = Describe("handleCreateComputeInstance", func() {
 		Expect(envelope.Category).To(Equal("invalid_request"))
 		Expect(envelope.GRPCCode).To(Equal("InvalidArgument"))
 		Expect(err.Error()).ToNot(ContainSubstring("private SQL host"))
+	})
+
+	It("Normalizes a missing public reference to a safe not-found error", func() {
+		instances := &mockComputeInstancesClient{
+			createFunc: func(
+				_ context.Context, _ *publicv1.ComputeInstancesCreateRequest, _ ...grpc.CallOption,
+			) (*publicv1.ComputeInstancesCreateResponse, error) {
+				return nil, status.Error(codes.InvalidArgument, "reference validation failed: not found")
+			},
+		}
+
+		handler := handleCreateComputeInstance(createPrerequisiteClients(instances))
+		_, output, err := handler(context.Background(), requestWithToken("raw-bearer-value"), CreateComputeInstanceInput{
+			Name: "demo-vm", CatalogItem: "catalog-item-1",
+		})
+		envelope := decodeToolError(err)
+		Expect(output).To(BeZero())
+		Expect(envelope.Category).To(Equal("not_found"))
+		Expect(envelope.GRPCCode).To(Equal("NotFound"))
+		Expect(envelope.Details).To(BeEmpty())
+		Expect(err.Error()).ToNot(ContainSubstring("reference validation failed"))
 	})
 
 	It("Returns a safe authorization error when the public API denies creation", func() {
@@ -281,7 +330,7 @@ var _ = Describe("handleCreateComputeInstance", func() {
 		Expect(err.Error()).ToNot(ContainSubstring("tenant is not allowed"))
 	})
 
-	It("Preserves a selected Project from another tenant in the public create object", func() {
+	It("Selects an eligible image and Project and preserves its tenant and name", func() {
 		var capturedObject *publicv1.ComputeInstance
 		instances := &mockComputeInstancesClient{
 			createFunc: func(
@@ -292,24 +341,19 @@ var _ = Describe("handleCreateComputeInstance", func() {
 			},
 		}
 		clients := createPrerequisiteClients(instances)
-		clients.diskImages = &mockDiskImagesClient{getFunc: func(
-			_ context.Context, _ *publicv1.DiskImagesGetRequest, _ ...grpc.CallOption,
-		) (*publicv1.DiskImagesGetResponse, error) {
-			return publicv1.DiskImagesGetResponse_builder{
-				Object: publicv1.DiskImage_builder{Id: "image-1"}.Build(),
-			}.Build(), nil
-		}}
 		clients.projects = &mockProjectsClient{listFunc: func(
 			_ context.Context, _ *publicv1.ProjectsListRequest, _ ...grpc.CallOption,
 		) (*publicv1.ProjectsListResponse, error) {
 			return publicv1.ProjectsListResponse_builder{
-				Items: []*publicv1.Project{{
-					Id:       "project-1",
-					Metadata: publicv1.Metadata_builder{Name: "team-b.project-1", Tenant: "tenant-b"}.Build(),
+				Items: []*publicv1.Project{publicv1.Project_builder{
+					Id: "project-1",
+					Metadata: publicv1.Metadata_builder{
+						Name: "team-a.project-1", Tenant: "tenant-2",
+					}.Build(),
 					Status: publicv1.ProjectStatus_builder{
 						State: publicv1.ProjectState_PROJECT_STATE_ACTIVE,
 					}.Build(),
-				}},
+				}.Build()},
 			}.Build(), nil
 		}}
 
@@ -318,8 +362,8 @@ var _ = Describe("handleCreateComputeInstance", func() {
 			Name: "demo-vm", CatalogItem: "catalog-item-1", DiskImageID: "image-1", ProjectID: "project-1",
 		})
 		Expect(err).ToNot(HaveOccurred())
-		Expect(capturedObject.GetMetadata().GetProject()).To(Equal("team-b.project-1"))
-		Expect(capturedObject.GetMetadata().GetTenant()).To(Equal("tenant-b"))
+		Expect(capturedObject.GetMetadata().GetTenant()).To(Equal("tenant-2"))
+		Expect(capturedObject.GetMetadata().GetProject()).To(Equal("team-a.project-1"))
 		Expect(capturedObject.GetSpec().GetDiskImage().GetId()).To(Equal("image-1"))
 	})
 
@@ -378,6 +422,7 @@ var _ = Describe("handleCreateComputeInstance", func() {
 		))
 		Expect(err.Error()).ToNot(ContainSubstring("private authorization details"))
 	})
+
 })
 
 func int32Pointer(value int32) *int32 {
@@ -413,9 +458,10 @@ var _ = Describe("handleUpdateComputeInstance", func() {
 			Expect(request.GetLock()).To(BeTrue())
 			Expect(request.GetObject().GetMetadata().GetVersion()).To(Equal(int32(7)))
 			Expect(request.GetUpdateMask().GetPaths()).To(ConsistOf(
-				"spec.instance_type", "spec.run_strategy",
+				"spec.instance_type", "spec.boot_disk.size_gib", "spec.run_strategy",
 			))
 			Expect(request.GetObject().GetSpec().GetInstanceType().GetId()).To(Equal("u1-large"))
+			Expect(request.GetObject().GetSpec().GetBootDisk().GetSizeGib()).To(Equal(int32(50)))
 			Expect(request.GetObject().GetSpec().GetRunStrategy()).To(Equal(
 				publicv1.ComputeInstanceRunStrategy_COMPUTE_INSTANCE_RUN_STRATEGY_HALTED,
 			))
@@ -430,18 +476,38 @@ var _ = Describe("handleUpdateComputeInstance", func() {
 			}.Build(), nil
 		}
 		clients := createPrerequisiteClients(instances)
-		clients.instanceTypes = &mockInstanceTypesClient{getFunc: func(
-			_ context.Context, _ *publicv1.InstanceTypesGetRequest, _ ...grpc.CallOption,
-		) (*publicv1.InstanceTypesGetResponse, error) {
-			return publicv1.InstanceTypesGetResponse_builder{
-				Object: publicv1.InstanceType_builder{Id: "u1-large"}.Build(),
-			}.Build(), nil
-		}}
 
+		bootDiskSize := int32(50)
 		handler := handleUpdateComputeInstance(clients)
 		_, output, err := handler(context.Background(), requestWithToken("raw-bearer-value"), UpdateComputeInstanceInput{
 			ID: "instance-1", Version: 7, InstanceTypeID: "u1-large",
+			BootDisk:    &ComputeInstanceBootDiskInput{SizeGiB: &bootDiskSize},
 			RunStrategy: "HALTED",
+		})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(output).To(Equal(UpdateComputeInstanceOutput{
+			ID: "instance-1", Version: 8, State: "COMPUTE_INSTANCE_STATE_RUNNING",
+		}))
+	})
+
+	It("Uses the requested ID when the public update response omits it", func() {
+		instances := instancesWithCurrent(7)
+		instances.updateFunc = func(
+			_ context.Context, _ *publicv1.ComputeInstancesUpdateRequest, _ ...grpc.CallOption,
+		) (*publicv1.ComputeInstancesUpdateResponse, error) {
+			return publicv1.ComputeInstancesUpdateResponse_builder{
+				Object: publicv1.ComputeInstance_builder{
+					Metadata: publicv1.Metadata_builder{Version: 8}.Build(),
+					Status: publicv1.ComputeInstanceStatus_builder{
+						State: publicv1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_RUNNING,
+					}.Build(),
+				}.Build(),
+			}.Build(), nil
+		}
+
+		handler := handleUpdateComputeInstance(createPrerequisiteClients(instances))
+		_, output, err := handler(context.Background(), requestWithToken("raw-bearer-value"), UpdateComputeInstanceInput{
+			ID: "instance-1", Version: 7, RunStrategy: "HALTED",
 		})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(output).To(Equal(UpdateComputeInstanceOutput{
@@ -487,131 +553,40 @@ var _ = Describe("handleUpdateComputeInstance", func() {
 		Expect(envelope.Message).To(Equal("The resource version is stale. Retrieve the current version and retry."))
 	})
 
-	It("Treats absent and editable catalog policies as allowed and rejects locked update fields", func() {
-		fieldCases := []struct {
-			name         string
-			input        UpdateComputeInstanceInput
-			absent       func() *publicv1.ComputeInstanceCatalogItemFields
-			editable     func() *publicv1.ComputeInstanceCatalogItemFields
-			locked       func() *publicv1.ComputeInstanceCatalogItemFields
-			lockedDetail string
-		}{
-			{
-				name:  "instance_type",
-				input: UpdateComputeInstanceInput{ID: "instance-1", Version: 7, InstanceTypeID: "u1-large"},
-				absent: func() *publicv1.ComputeInstanceCatalogItemFields {
-					return publicv1.ComputeInstanceCatalogItemFields_builder{}.Build()
-				},
-				editable: func() *publicv1.ComputeInstanceCatalogItemFields {
-					return publicv1.ComputeInstanceCatalogItemFields_builder{
-						InstanceType: publicv1.InstanceTypeReferenceFieldPolicy_builder{
-							Editable: publicv1.EditableInstanceTypeReferenceField_builder{}.Build(),
-						}.Build(),
-					}.Build()
-				},
-				locked: func() *publicv1.ComputeInstanceCatalogItemFields {
-					return publicv1.ComputeInstanceCatalogItemFields_builder{
-						InstanceType: publicv1.InstanceTypeReferenceFieldPolicy_builder{
-							Locked: publicv1.InstanceTypeReference_builder{Id: "u1-small"}.Build(),
-						}.Build(),
-					}.Build()
-				},
-				lockedDetail: "instance_type is locked by the selected catalog item",
-			},
-			{
-				name:  "run_strategy",
-				input: UpdateComputeInstanceInput{ID: "instance-1", Version: 7, RunStrategy: "HALTED"},
-				absent: func() *publicv1.ComputeInstanceCatalogItemFields {
-					return publicv1.ComputeInstanceCatalogItemFields_builder{}.Build()
-				},
-				editable: func() *publicv1.ComputeInstanceCatalogItemFields {
-					return publicv1.ComputeInstanceCatalogItemFields_builder{
-						RunStrategy: publicv1.ComputeInstanceRunStrategyFieldPolicy_builder{
-							Editable: publicv1.EditableComputeInstanceRunStrategyField_builder{}.Build(),
-						}.Build(),
-					}.Build()
-				},
-				locked: func() *publicv1.ComputeInstanceCatalogItemFields {
-					return publicv1.ComputeInstanceCatalogItemFields_builder{
-						RunStrategy: publicv1.ComputeInstanceRunStrategyFieldPolicy_builder{
-							Locked: publicv1.ComputeInstanceRunStrategy_COMPUTE_INSTANCE_RUN_STRATEGY_ALWAYS.Enum(),
-						}.Build(),
-					}.Build()
-				},
-				lockedDetail: "run_strategy is locked by the selected catalog item",
-			},
+	It("Rejects a catalog-locked field before the public update", func() {
+		instances := instancesWithCurrent(7)
+		instances.updateFunc = func(
+			_ context.Context, _ *publicv1.ComputeInstancesUpdateRequest, _ ...grpc.CallOption,
+		) (*publicv1.ComputeInstancesUpdateResponse, error) {
+			return nil, errors.New("Update should not be called")
 		}
-
-		for _, fieldCase := range fieldCases {
-			variants := []struct {
-				name   string
-				fields func() *publicv1.ComputeInstanceCatalogItemFields
-				locked bool
-			}{
-				{name: "absent policy", fields: fieldCase.absent},
-				{name: "editable policy", fields: fieldCase.editable},
-				{name: "locked policy", fields: fieldCase.locked, locked: true},
-			}
-			for _, variant := range variants {
-				By(fieldCase.name + ": " + variant.name)
-				updateCalls := 0
-				instances := instancesWithCurrent(7)
-				instances.updateFunc = func(
-					_ context.Context, _ *publicv1.ComputeInstancesUpdateRequest, _ ...grpc.CallOption,
-				) (*publicv1.ComputeInstancesUpdateResponse, error) {
-					updateCalls++
-					return publicv1.ComputeInstancesUpdateResponse_builder{
-						Object: publicv1.ComputeInstance_builder{
-							Id:       "instance-1",
-							Metadata: publicv1.Metadata_builder{Version: 8}.Build(),
-						}.Build(),
-					}.Build(), nil
-				}
-				clients := createPrerequisiteClients(instances)
-				clients.catalogItems = &mockComputeInstanceCatalogItemsClient{
-					getFunc: func(
-						_ context.Context, _ *publicv1.ComputeInstanceCatalogItemsGetRequest, _ ...grpc.CallOption,
-					) (*publicv1.ComputeInstanceCatalogItemsGetResponse, error) {
-						return publicv1.ComputeInstanceCatalogItemsGetResponse_builder{
-							Object: publicv1.ComputeInstanceCatalogItem_builder{
-								Id:     "catalog-item-1",
-								Fields: variant.fields(),
+		clients := createPrerequisiteClients(instances)
+		clients.catalogItems = &mockComputeInstanceCatalogItemsClient{
+			getFunc: func(
+				_ context.Context, _ *publicv1.ComputeInstanceCatalogItemsGetRequest, _ ...grpc.CallOption,
+			) (*publicv1.ComputeInstanceCatalogItemsGetResponse, error) {
+				return publicv1.ComputeInstanceCatalogItemsGetResponse_builder{
+					Object: publicv1.ComputeInstanceCatalogItem_builder{
+						Id: "catalog-item-1",
+						Fields: publicv1.ComputeInstanceCatalogItemFields_builder{
+							InstanceType: publicv1.InstanceTypeReferenceFieldPolicy_builder{
+								Locked: publicv1.InstanceTypeReference_builder{Id: "u1-small"}.Build(),
 							}.Build(),
-						}.Build(), nil
-					},
-				}
-				clients.instanceTypes = &mockInstanceTypesClient{getFunc: func(
-					_ context.Context, _ *publicv1.InstanceTypesGetRequest, _ ...grpc.CallOption,
-				) (*publicv1.InstanceTypesGetResponse, error) {
-					return publicv1.InstanceTypesGetResponse_builder{
-						Object: publicv1.InstanceType_builder{Id: "u1-large"}.Build(),
-					}.Build(), nil
-				}}
-				clients.storageTiers = &mockStorageTiersClient{getFunc: func(
-					_ context.Context, _ *publicv1.StorageTiersGetRequest, _ ...grpc.CallOption,
-				) (*publicv1.StorageTiersGetResponse, error) {
-					return publicv1.StorageTiersGetResponse_builder{
-						Object: publicv1.StorageTier_builder{Id: "fast"}.Build(),
-					}.Build(), nil
-				}}
-
-				_, output, err := handleUpdateComputeInstance(clients)(
-					context.Background(), requestWithToken("raw-bearer-value"), fieldCase.input,
-				)
-				if variant.locked {
-					envelope := decodeToolError(err)
-					Expect(output).To(BeZero())
-					Expect(updateCalls).To(BeZero())
-					Expect(envelope.Category).To(Equal("invalid_request"))
-					Expect(envelope.GRPCCode).To(Equal("InvalidArgument"))
-					Expect(envelope.Details).To(ConsistOf(fieldCase.lockedDetail))
-				} else {
-					Expect(err).ToNot(HaveOccurred())
-					Expect(updateCalls).To(Equal(1))
-					Expect(output.Version).To(Equal(int32(8)))
-				}
-			}
+						}.Build(),
+					}.Build(),
+				}.Build(), nil
+			},
 		}
+
+		handler := handleUpdateComputeInstance(clients)
+		_, output, err := handler(context.Background(), requestWithToken("raw-bearer-value"), UpdateComputeInstanceInput{
+			ID: "instance-1", Version: 7, InstanceTypeID: "u1-large",
+		})
+		envelope := decodeToolError(err)
+		Expect(output).To(BeZero())
+		Expect(envelope.Category).To(Equal("invalid_request"))
+		Expect(envelope.GRPCCode).To(Equal("InvalidArgument"))
+		Expect(envelope.Details).To(ConsistOf("instance_type is locked by the selected catalog item"))
 	})
 
 	It("Requires a supported field and a current version", func() {

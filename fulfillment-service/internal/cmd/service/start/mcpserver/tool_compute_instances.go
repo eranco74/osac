@@ -27,26 +27,16 @@ import (
 )
 
 type computeInstanceClients struct {
-	instances      publicv1.ComputeInstancesClient
-	catalogItems   publicv1.ComputeInstanceCatalogItemsClient
-	diskImages     publicv1.DiskImagesClient
-	projects       publicv1.ProjectsClient
-	instanceTypes  publicv1.InstanceTypesClient
-	storageTiers   publicv1.StorageTiersClient
-	subnets        publicv1.SubnetsClient
-	securityGroups publicv1.SecurityGroupsClient
+	instances    publicv1.ComputeInstancesClient
+	catalogItems publicv1.ComputeInstanceCatalogItemsClient
+	projects     publicv1.ProjectsClient
 }
 
 func newComputeInstanceClients(deps ServerDeps) computeInstanceClients {
 	return computeInstanceClients{
-		instances:      deps.ComputeInstancesClient,
-		catalogItems:   deps.ComputeInstanceCatalogItemsClient,
-		diskImages:     deps.DiskImagesClient,
-		projects:       deps.ProjectsClient,
-		instanceTypes:  deps.InstanceTypesClient,
-		storageTiers:   deps.StorageTiersClient,
-		subnets:        deps.SubnetsClient,
-		securityGroups: deps.SecurityGroupsClient,
+		instances:    deps.ComputeInstancesClient,
+		catalogItems: deps.ComputeInstanceCatalogItemsClient,
+		projects:     deps.ProjectsClient,
 	}
 }
 
@@ -87,10 +77,11 @@ type CreateComputeInstanceOutput struct {
 }
 
 type UpdateComputeInstanceInput struct {
-	ID             string `json:"id" jsonschema:"compute instance ID from get_resource"`
-	Version        int32  `json:"version" jsonschema:"current metadata.version from get_resource; must be greater than zero"`
-	InstanceTypeID string `json:"instance_type_id,omitempty" jsonschema:"optional ID from list_resources(instance_type); the catalog item must permit the update"`
-	RunStrategy    string `json:"run_strategy,omitempty" jsonschema:"optional run strategy: ALWAYS or HALTED"`
+	ID             string                        `json:"id" jsonschema:"compute instance ID from get_resource"`
+	Version        int32                         `json:"version" jsonschema:"current metadata.version from get_resource; must be greater than zero"`
+	InstanceTypeID string                        `json:"instance_type_id,omitempty" jsonschema:"optional ID from list_resources(instance_type); the catalog item must permit the update"`
+	BootDisk       *ComputeInstanceBootDiskInput `json:"boot_disk,omitempty" jsonschema:"optional object with size_gib and/or storage_tier_id; each supplied field is updated and must be permitted by the catalog item"`
+	RunStrategy    string                        `json:"run_strategy,omitempty" jsonschema:"optional run strategy: ALWAYS or HALTED"`
 }
 
 type UpdateComputeInstanceOutput struct {
@@ -118,7 +109,11 @@ func handleCreateComputeInstance(
 		if err != nil {
 			return nil, CreateComputeInstanceOutput{}, safeInvalidRequestError(err)
 		}
-		spec, err := computeInstanceSpecFromInput(input)
+		networkAttachment, err := validateComputeInstanceNetworkAttachments(input.NetworkAttachments)
+		if err != nil {
+			return nil, CreateComputeInstanceOutput{}, safeInvalidRequestError(err)
+		}
+		spec, err := computeInstanceSpecFromInput(input, networkAttachment)
 		if err != nil {
 			return nil, CreateComputeInstanceOutput{}, safeInvalidRequestError(err)
 		}
@@ -128,23 +123,20 @@ func handleCreateComputeInstance(
 		if err != nil {
 			return nil, CreateComputeInstanceOutput{}, err
 		}
-		project, err := preflightCreateComputeInstancePrerequisites(ctx, clients, input)
+		project, err := lookupCreateComputeInstanceProject(ctx, clients.projects, input.ProjectID)
 		if err != nil {
 			return nil, CreateComputeInstanceOutput{}, err
 		}
-		metadata := publicv1.Metadata_builder{Name: input.Name}
-		if project != nil {
-			metadata.Tenant = project.GetMetadata().GetTenant()
-			metadata.Project = project.GetMetadata().GetName()
-		}
 		response, err := clients.instances.Create(ctx, publicv1.ComputeInstancesCreateRequest_builder{
 			Object: publicv1.ComputeInstance_builder{
-				Metadata: metadata.Build(),
-				Spec:     spec,
+				Metadata: publicv1.Metadata_builder{
+					Name: input.Name, Tenant: project.tenant, Project: project.name,
+				}.Build(),
+				Spec: spec,
 			}.Build(),
 		}.Build())
 		if err != nil {
-			return nil, CreateComputeInstanceOutput{}, safePublicAPIError(err)
+			return nil, CreateComputeInstanceOutput{}, safeCreateComputeInstanceError(err)
 		}
 		created := response.GetObject()
 		return nil, CreateComputeInstanceOutput{
@@ -155,130 +147,50 @@ func handleCreateComputeInstance(
 	}
 }
 
-func preflightCreateComputeInstancePrerequisites(
-	ctx context.Context, clients computeInstanceClients, input CreateComputeInstanceInput,
-) (*publicv1.Project, error) {
-	catalogResponse, err := clients.catalogItems.Get(ctx, publicv1.ComputeInstanceCatalogItemsGetRequest_builder{
-		Id: input.CatalogItem,
+type createComputeInstanceProject struct {
+	tenant string
+	name   string
+}
+
+func lookupCreateComputeInstanceProject(
+	ctx context.Context, client publicv1.ProjectsClient, projectID string,
+) (createComputeInstanceProject, error) {
+	if projectID == "" {
+		return createComputeInstanceProject{}, nil
+	}
+	filter := fmt.Sprintf("this.id == %q", projectID)
+	response, err := client.List(ctx, publicv1.ProjectsListRequest_builder{
+		Filter: new(filter),
+		Limit:  new(int32(2)),
 	}.Build())
 	if err != nil {
-		return nil, safePrerequisiteError("catalog item", input.CatalogItem, err)
+		return createComputeInstanceProject{}, safePrerequisiteError("Project", projectID, err)
 	}
-	if !catalogResponse.GetObject().GetPublished() {
-		return nil, safeInvalidRequestError(fmt.Errorf(
-			"catalog item %s is not published", input.CatalogItem,
-		))
+	items := response.GetItems()
+	if len(items) != 1 {
+		return createComputeInstanceProject{}, safeMissingPrerequisiteError("Project", projectID)
 	}
+	project := items[0]
+	return createComputeInstanceProject{
+		tenant: project.GetMetadata().GetTenant(),
+		name:   project.GetMetadata().GetName(),
+	}, nil
+}
 
-	if input.DiskImageID != "" {
-		imageResponse, imageErr := clients.diskImages.Get(ctx, publicv1.DiskImagesGetRequest_builder{
-			Id: input.DiskImageID,
-		}.Build())
-		if imageErr != nil {
-			return nil, safePrerequisiteError("disk image", input.DiskImageID, imageErr)
-		}
-		if imageResponse.GetObject().GetSpec().GetLifecycle() == publicv1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_OBSOLETE {
-			return nil, safeInvalidRequestError(fmt.Errorf(
-				"disk image %s is obsolete", input.DiskImageID,
-			))
-		}
+func safeCreateComputeInstanceError(err error) error {
+	if isMissingReferenceError(err) {
+		return safeMissingReferenceError()
 	}
+	return safePublicAPIError(err)
+}
 
-	var selectedProject *publicv1.Project
-	if input.ProjectID != "" {
-		filter := fmt.Sprintf("this.id == %q", input.ProjectID)
-		projectResponse, projectErr := clients.projects.List(ctx, publicv1.ProjectsListRequest_builder{
-			Filter: &filter,
-		}.Build())
-		if projectErr != nil {
-			return nil, safePrerequisiteError("Project", input.ProjectID, projectErr)
-		}
-		if len(projectResponse.GetItems()) != 1 {
-			return nil, safePrerequisiteError(
-				"Project", input.ProjectID, status.Error(codes.NotFound, "project is not visible"),
-			)
-		}
-		project := projectResponse.GetItems()[0]
-		if project.GetStatus().GetState() != publicv1.ProjectState_PROJECT_STATE_ACTIVE {
-			return nil, safeInvalidRequestError(fmt.Errorf(
-				"project %s is not active", input.ProjectID,
-			))
-		}
-		selectedProject = project
+func isMissingReferenceError(err error) bool {
+	if status.Code(err) != codes.InvalidArgument {
+		return false
 	}
-
-	if input.InstanceTypeID != "" {
-		_, instanceTypeErr := clients.instanceTypes.Get(ctx, publicv1.InstanceTypesGetRequest_builder{
-			Id: input.InstanceTypeID,
-		}.Build())
-		if instanceTypeErr != nil {
-			return nil, safePrerequisiteError("instance type", input.InstanceTypeID, instanceTypeErr)
-		}
-	}
-	if input.BootDisk != nil && input.BootDisk.StorageTierID != "" {
-		_, storageTierErr := clients.storageTiers.Get(ctx, publicv1.StorageTiersGetRequest_builder{
-			Id: input.BootDisk.StorageTierID,
-		}.Build())
-		if storageTierErr != nil {
-			return nil, safePrerequisiteError("storage tier", input.BootDisk.StorageTierID, storageTierErr)
-		}
-	}
-
-	securityGroupIDs := make([]string, 0)
-	for _, attachment := range input.NetworkAttachments {
-		securityGroupIDs = append(securityGroupIDs, attachment.SecurityGroupIDs...)
-	}
-	if len(securityGroupIDs) > 0 {
-		uniqueSecurityGroupIDs := make([]string, 0, len(securityGroupIDs))
-		seenSecurityGroupIDs := make(map[string]struct{}, len(securityGroupIDs))
-		for _, securityGroupID := range securityGroupIDs {
-			if _, exists := seenSecurityGroupIDs[securityGroupID]; exists {
-				continue
-			}
-			seenSecurityGroupIDs[securityGroupID] = struct{}{}
-			uniqueSecurityGroupIDs = append(uniqueSecurityGroupIDs, securityGroupID)
-		}
-		if len(uniqueSecurityGroupIDs) > maxPreflightSecurityGroups {
-			return nil, safeInvalidRequestError(fmt.Errorf(
-				"network_attachments must reference at most %d unique security groups", maxPreflightSecurityGroups,
-			))
-		}
-		quotedSecurityGroupIDs := make([]string, len(uniqueSecurityGroupIDs))
-		for i, securityGroupID := range uniqueSecurityGroupIDs {
-			quotedSecurityGroupIDs[i] = fmt.Sprintf("%q", securityGroupID)
-		}
-		filter := fmt.Sprintf("this.id in [%s]", strings.Join(quotedSecurityGroupIDs, ","))
-		limit := int32(maxPreflightSecurityGroups)
-		response, listErr := clients.securityGroups.List(ctx, publicv1.SecurityGroupsListRequest_builder{
-			Filter: &filter,
-			Limit:  &limit,
-		}.Build())
-		if listErr != nil {
-			return nil, safePrerequisiteError("SecurityGroup", uniqueSecurityGroupIDs[0], listErr)
-		}
-		visibleSecurityGroups := make(map[string]struct{}, len(response.GetItems()))
-		for _, securityGroup := range response.GetItems() {
-			visibleSecurityGroups[securityGroup.GetId()] = struct{}{}
-		}
-		for _, securityGroupID := range uniqueSecurityGroupIDs {
-			if _, visible := visibleSecurityGroups[securityGroupID]; !visible {
-				return nil, safePrerequisiteError(
-					"SecurityGroup", securityGroupID, status.Error(codes.NotFound, "security group is not visible"),
-				)
-			}
-		}
-	}
-
-	for _, attachment := range input.NetworkAttachments {
-		_, subnetErr := clients.subnets.Get(ctx, publicv1.SubnetsGetRequest_builder{
-			Id: attachment.SubnetID,
-		}.Build())
-		if subnetErr != nil {
-			return nil, safePrerequisiteError("Subnet", attachment.SubnetID, subnetErr)
-		}
-	}
-
-	return selectedProject, nil
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "reference validation failed") &&
+		strings.Contains(message, "not found")
 }
 
 func normalizeCreateComputeInstanceInput(input CreateComputeInstanceInput) (CreateComputeInstanceInput, error) {
@@ -300,22 +212,67 @@ func normalizeCreateComputeInstanceInput(input CreateComputeInstanceInput) (Crea
 		}
 	}
 	if input.NetworkAttachments != nil {
-		attachments := make([]ComputeInstanceNetworkAttachmentInput, len(input.NetworkAttachments))
-		for i, attachment := range input.NetworkAttachments {
-			attachment.SubnetID = strings.TrimSpace(attachment.SubnetID)
-			securityGroupIDs := make([]string, len(attachment.SecurityGroupIDs))
-			for j, securityGroupID := range attachment.SecurityGroupIDs {
-				securityGroupIDs[j] = strings.TrimSpace(securityGroupID)
+		for attachmentIndex := range input.NetworkAttachments {
+			input.NetworkAttachments[attachmentIndex].SubnetID =
+				strings.TrimSpace(input.NetworkAttachments[attachmentIndex].SubnetID)
+			for securityGroupIndex := range input.NetworkAttachments[attachmentIndex].SecurityGroupIDs {
+				input.NetworkAttachments[attachmentIndex].SecurityGroupIDs[securityGroupIndex] =
+					strings.TrimSpace(input.NetworkAttachments[attachmentIndex].SecurityGroupIDs[securityGroupIndex])
 			}
-			attachment.SecurityGroupIDs = securityGroupIDs
-			attachments[i] = attachment
 		}
-		input.NetworkAttachments = attachments
 	}
 	return input, nil
 }
 
-func computeInstanceSpecFromInput(input CreateComputeInstanceInput) (*publicv1.ComputeInstanceSpec, error) {
+func validateComputeInstanceNetworkAttachments(
+	input []ComputeInstanceNetworkAttachmentInput,
+) (*publicv1.ComputeNetworkAttachment, error) {
+	if input == nil {
+		return nil, nil
+	}
+	if len(input) == 0 {
+		return nil, fmt.Errorf("network_attachments must contain at least one attachment when supplied")
+	}
+	if len(input) > 1 {
+		return nil, fmt.Errorf("network_attachments must contain at most one attachment")
+	}
+	if input[0].SubnetID == "" {
+		return nil, fmt.Errorf("network_attachments[0].subnet_id is required")
+	}
+	if len(input[0].SecurityGroupIDs) > maxPreflightSecurityGroups {
+		return nil, fmt.Errorf(
+			"network_attachments must reference at most %d security groups", maxPreflightSecurityGroups,
+		)
+	}
+	uniqueSecurityGroupIDs := make([]string, 0, maxPreflightSecurityGroups)
+	seenSecurityGroupIDs := make(map[string]struct{}, maxPreflightSecurityGroups+1)
+	for securityGroupIndex, securityGroupID := range input[0].SecurityGroupIDs {
+		if securityGroupID == "" {
+			return nil, fmt.Errorf(
+				"network_attachments[0].security_group_ids[%d] is required", securityGroupIndex,
+			)
+		}
+		if _, exists := seenSecurityGroupIDs[securityGroupID]; exists {
+			continue
+		}
+		seenSecurityGroupIDs[securityGroupID] = struct{}{}
+		uniqueSecurityGroupIDs = append(uniqueSecurityGroupIDs, securityGroupID)
+	}
+	securityGroups := make([]*publicv1.SecurityGroupLocalReference, len(uniqueSecurityGroupIDs))
+	for securityGroupIndex, securityGroupID := range uniqueSecurityGroupIDs {
+		securityGroups[securityGroupIndex] =
+			publicv1.SecurityGroupLocalReference_builder{Id: securityGroupID}.Build()
+	}
+	attachment := publicv1.ComputeNetworkAttachment_builder{
+		Subnet:         publicv1.SubnetLocalReference_builder{Id: input[0].SubnetID}.Build(),
+		SecurityGroups: securityGroups,
+	}.Build()
+	return attachment, nil
+}
+
+func computeInstanceSpecFromInput(
+	input CreateComputeInstanceInput, networkAttachment *publicv1.ComputeNetworkAttachment,
+) (*publicv1.ComputeInstanceSpec, error) {
 	builder := publicv1.ComputeInstanceSpec_builder{
 		CatalogItem: publicv1.ComputeInstanceCatalogItemReference_builder{Id: input.CatalogItem}.Build(),
 	}
@@ -332,12 +289,8 @@ func computeInstanceSpecFromInput(input CreateComputeInstanceInput) (*publicv1.C
 		}
 		builder.BootDisk = bootDisk
 	}
-	if input.NetworkAttachments != nil {
-		attachments, err := computeInstanceNetworkAttachmentsFromInput(input.NetworkAttachments)
-		if err != nil {
-			return nil, err
-		}
-		builder.NetworkAttachments = attachments
+	if networkAttachment != nil {
+		builder.NetworkAttachments = []*publicv1.ComputeNetworkAttachment{networkAttachment}
 	}
 	return builder.Build(), nil
 }
@@ -355,35 +308,6 @@ func computeInstanceBootDiskFromInput(input ComputeInstanceBootDiskInput) (*publ
 		builder.StorageTier = publicv1.StorageTierReference_builder{Id: storageTierID}.Build()
 	}
 	return builder.Build(), nil
-}
-
-func computeInstanceNetworkAttachmentsFromInput(input []ComputeInstanceNetworkAttachmentInput) ([]*publicv1.ComputeNetworkAttachment, error) {
-	if len(input) == 0 {
-		return nil, fmt.Errorf("network_attachments must contain at least one attachment when supplied")
-	}
-	if len(input) > 1 {
-		return nil, fmt.Errorf("network_attachments must contain at most one attachment")
-	}
-	attachments := make([]*publicv1.ComputeNetworkAttachment, len(input))
-	for i, attachment := range input {
-		subnetID := strings.TrimSpace(attachment.SubnetID)
-		if subnetID == "" {
-			return nil, fmt.Errorf("network_attachments[%d].subnet_id is required", i)
-		}
-		securityGroups := make([]*publicv1.SecurityGroupLocalReference, len(attachment.SecurityGroupIDs))
-		for j, securityGroupID := range attachment.SecurityGroupIDs {
-			securityGroupID = strings.TrimSpace(securityGroupID)
-			if securityGroupID == "" {
-				return nil, fmt.Errorf("network_attachments[%d].security_group_ids[%d] is required", i, j)
-			}
-			securityGroups[j] = publicv1.SecurityGroupLocalReference_builder{Id: securityGroupID}.Build()
-		}
-		attachments[i] = publicv1.ComputeNetworkAttachment_builder{
-			Subnet:         publicv1.SubnetLocalReference_builder{Id: subnetID}.Build(),
-			SecurityGroups: securityGroups,
-		}.Build()
-	}
-	return attachments, nil
 }
 
 func handleUpdateComputeInstance(
@@ -427,22 +351,25 @@ func handleUpdateComputeInstance(
 			}
 		}
 
-		if input.InstanceTypeID != "" {
-			_, instanceTypeErr := clients.instanceTypes.Get(ctx, publicv1.InstanceTypesGetRequest_builder{
-				Id: input.InstanceTypeID,
-			}.Build())
-			if instanceTypeErr != nil {
-				return nil, UpdateComputeInstanceOutput{}, safePrerequisiteError(
-					"instance type", input.InstanceTypeID, instanceTypeErr,
-				)
-			}
-		}
-		paths := make([]string, 0, 2)
+		paths := make([]string, 0, 3)
 		metadata := publicv1.Metadata_builder{Version: input.Version}
 		spec := publicv1.ComputeInstanceSpec_builder{}
 		if input.InstanceTypeID != "" {
 			paths = append(paths, "spec.instance_type")
 			spec.InstanceType = publicv1.InstanceTypeReference_builder{Id: input.InstanceTypeID}.Build()
+		}
+		if input.BootDisk != nil {
+			bootDisk, bootDiskErr := computeInstanceBootDiskFromInput(*input.BootDisk)
+			if bootDiskErr != nil {
+				return nil, UpdateComputeInstanceOutput{}, safeInvalidRequestError(bootDiskErr)
+			}
+			spec.BootDisk = bootDisk
+			if input.BootDisk.SizeGiB != nil {
+				paths = append(paths, "spec.boot_disk.size_gib")
+			}
+			if input.BootDisk.StorageTierID != "" {
+				paths = append(paths, "spec.boot_disk.storage_tier")
+			}
 		}
 		if input.RunStrategy != "" {
 			paths = append(paths, "spec.run_strategy")
@@ -464,8 +391,12 @@ func handleUpdateComputeInstance(
 			return nil, UpdateComputeInstanceOutput{}, safePublicAPIError(err)
 		}
 		updated := response.GetObject()
+		updatedID := updated.GetId()
+		if updatedID == "" {
+			updatedID = input.ID
+		}
 		return nil, UpdateComputeInstanceOutput{
-			ID:      updated.GetId(),
+			ID:      updatedID,
 			Version: updated.GetMetadata().GetVersion(),
 			State:   updated.GetStatus().GetState().String(),
 		}, nil
@@ -482,7 +413,7 @@ func normalizeUpdateComputeInstanceInput(input UpdateComputeInstanceInput) (Upda
 	if input.Version < 1 {
 		return UpdateComputeInstanceInput{}, fmt.Errorf("version must be greater than zero")
 	}
-	if input.InstanceTypeID == "" && input.RunStrategy == "" {
+	if input.InstanceTypeID == "" && input.BootDisk == nil && input.RunStrategy == "" {
 		return UpdateComputeInstanceInput{}, fmt.Errorf("at least one supported update field is required")
 	}
 	if input.RunStrategy != "" && parseComputeInstanceRunStrategy(input.RunStrategy) ==
@@ -490,6 +421,12 @@ func normalizeUpdateComputeInstanceInput(input UpdateComputeInstanceInput) (Upda
 		return UpdateComputeInstanceInput{}, fmt.Errorf(
 			"run_strategy must be ALWAYS or HALTED",
 		)
+	}
+	if input.BootDisk != nil {
+		input.BootDisk = &ComputeInstanceBootDiskInput{
+			SizeGiB:       input.BootDisk.SizeGiB,
+			StorageTierID: strings.TrimSpace(input.BootDisk.StorageTierID),
+		}
 	}
 	return input, nil
 }
@@ -511,11 +448,21 @@ func validateUpdateAgainstCatalogItem(
 	if fields == nil {
 		return nil
 	}
-	if input.InstanceTypeID != "" && fields.GetInstanceType().HasLocked() {
+	if input.InstanceTypeID != "" && fields.GetInstanceType().GetEditable() == nil {
 		return safeInvalidRequestError(fmt.Errorf("instance_type is locked by the selected catalog item"))
 	}
-	if input.RunStrategy != "" && fields.GetRunStrategy().HasLocked() {
+	if input.RunStrategy != "" && fields.GetRunStrategy().GetEditable() == nil {
 		return safeInvalidRequestError(fmt.Errorf("run_strategy is locked by the selected catalog item"))
+	}
+	if input.BootDisk != nil {
+		if input.BootDisk.SizeGiB != nil && fields.GetBootDisk().GetSizeGib().GetEditable() == nil {
+			return safeInvalidRequestError(fmt.Errorf("boot_disk.size_gib is locked by the selected catalog item"))
+		}
+		if input.BootDisk.StorageTierID != "" && fields.GetBootDisk().GetStorageTier().GetEditable() == nil {
+			return safeInvalidRequestError(fmt.Errorf(
+				"boot_disk.storage_tier_id is locked by the selected catalog item",
+			))
+		}
 	}
 	return nil
 }
