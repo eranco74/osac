@@ -198,11 +198,12 @@ Touched-area requirements: [component guide](../fulfillment-service/AGENTS.md#in
 - **VMaaS ComputeInstance network-attachment Create contract ([OSAC-5562](https://redhat.atlassian.net/browse/OSAC-5562), [OSAC-5563](https://redhat.atlassian.net/browse/OSAC-5563), DEV):** `fulfillment-service/it/it_compute_subnet_test.go` exercises the public API's one-attachment limit, no-persistence errors for missing tenant defaults and missing SecurityGroups on a non-default VirtualNetwork, and persistence of an explicitly specified attachment. `internal/servers/private_compute_instances_server_test.go` covers successful field-by-field tenant-default completion. This is Fulfillment Service and database coverage; provider provisioning remains E2E coverage.
 - **MCP server:** `fulfillment-service/it/it_mcp_server_test.go` uses a real MCP
   SDK client and an in-process MCP handler; its exchanger forwards a caller API
-  token to deployed Fulfillment and PostgreSQL. It covers five-tool discovery,
-  connection summaries, tenant visibility, creator attribution, asynchronous
-  create acceptance with the resource ID and version, rejected arbitrary
-  service/method/payload arguments, and rejected writes without persisted
-  mutations. `it_mcp_discovery_test.go` creates
+  token to deployed Fulfillment and PostgreSQL. It covers six-tool discovery,
+  connection summaries, tenant visibility, Project and image prerequisite
+  selection, creator attribution, asynchronous create and update acceptance
+  with resource IDs and versions, optimistic-conflict rejection, rejected
+  arbitrary service/method/payload arguments, and rejected writes without
+  persisted mutations. `it_mcp_discovery_test.go` creates
   Projects and Secret references for two tenants, verifies caller-scoped
   Project and Secret-reference listing, confirms Secret-reference results
   contain only reference metadata, and checks list-only Secret Get rejection
@@ -216,8 +217,8 @@ Touched-area requirements: [component guide](../fulfillment-service/AGENTS.md#in
   covers expired and untrusted-issuer tokens; MCP ingress tests cover wrong
   resource audiences. `mcpserver` unit tests cover 4xx/429/5xx and transport
   exchange failures, typed registration, caller/permission mismatch, safe
-  errors, and connection checks. Helm lint and rendering cover opt-in templates
-  and schema; ordinary
+  errors, prerequisite checks, and connection checks. Helm lint and rendering
+  cover opt-in templates and schema; ordinary
   profile renders exercise the disabled default. Provider provisioning, VM
   readiness, and external MCP-host interoperability remain outside these tests.
 - **ExternalIP allocation capacity ([DEV] OSAC-6307):** `internal/servers/private_external_ips_server_test.go` verifies capacity remains held while the ExternalIP has a finalizer and returns after archive. Migration 125 backfills pending deletions and checks exactly-once release in PostgreSQL. Application and database checks keep terminating consumers exclusive until archive. Provider cleanup is covered by operator tests with fixtures.
