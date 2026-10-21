@@ -256,8 +256,10 @@ installer command in the tier table remains the component-integration check.
 - **MCP server:** `fulfillment-service/it/it_mcp_server_test.go` uses a real MCP
   SDK client and an in-process MCP handler; its exchanger forwards a caller API
   token to deployed Fulfillment and PostgreSQL. It covers five-tool discovery,
-  connection summaries, tenant visibility, creator attribution, and rejected
-  writes without persisted mutations. `it_mcp_discovery_test.go` creates
+  connection summaries, tenant visibility, creator attribution, asynchronous
+  create acceptance with the resource ID and version, rejected arbitrary
+  service/method/payload arguments, and rejected writes without persisted
+  mutations. `it_mcp_discovery_test.go` creates
   Projects and Secret references for two tenants, verifies caller-scoped
   Project and Secret-reference listing, confirms Secret-reference results
   contain only reference metadata, and checks list-only Secret Get rejection
@@ -270,8 +272,9 @@ installer command in the tier table remains the component-integration check.
   settings and replica counts. `internal/auth/auth_jwt_validator_test.go`
   covers expired and untrusted-issuer tokens; MCP ingress tests cover wrong
   resource audiences. `mcpserver` unit tests cover 4xx/429/5xx and transport
-  exchange failures, caller/permission mismatch, safe errors, and connection
-  checks. Helm lint and rendering cover opt-in templates and schema; ordinary
+  exchange failures, typed registration, caller/permission mismatch, safe
+  errors, and connection checks. Helm lint and rendering cover opt-in templates
+  and schema; ordinary
   profile renders exercise the disabled default. Provider provisioning, VM
   readiness, and external MCP-host interoperability remain outside these tests.
 - **ComputeInstance deletion feedback with stale references ([OSAC-6513](https://redhat.atlassian.net/browse/OSAC-6513), DEV):** `internal/references/reference_validator_test.go` covers status-only, spec, mixed, and empty masks at Unit tier. `it/it_compute_instance_update_test.go` holds a deleting ComputeInstance, removes its referenced user-data Secret, then checks that status feedback persists through the deployed private Fulfillment API and PostgreSQL while spec, mixed, and empty-mask updates still reject the missing reference. Run it with the Fulfillment installer target above; against an already deployed compatible Kind environment, run `ginkgo run --timeout 20m --focus 'persists deletion feedback after a referenced Secret disappears' it` from `fulfillment-service/`. The suite omits the operator, AAP, and VM provider, so it does not prove dependent network teardown.
