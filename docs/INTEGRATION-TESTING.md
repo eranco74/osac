@@ -198,9 +198,13 @@ Touched-area requirements: [component guide](../fulfillment-service/AGENTS.md#in
 - **VMaaS ComputeInstance network-attachment Create contract ([OSAC-5562](https://redhat.atlassian.net/browse/OSAC-5562), [OSAC-5563](https://redhat.atlassian.net/browse/OSAC-5563), DEV):** `fulfillment-service/it/it_compute_subnet_test.go` exercises the public API's one-attachment limit, no-persistence errors for missing tenant defaults and missing SecurityGroups on a non-default VirtualNetwork, and persistence of an explicitly specified attachment. `internal/servers/private_compute_instances_server_test.go` covers successful field-by-field tenant-default completion. This is Fulfillment Service and database coverage; provider provisioning remains E2E coverage.
 - **MCP server:** `fulfillment-service/it/it_mcp_server_test.go` uses a real MCP
   SDK client and an in-process MCP handler; its exchanger forwards a caller API
-  token to deployed Fulfillment and PostgreSQL. It covers tool discovery,
+  token to deployed Fulfillment and PostgreSQL. It covers five-tool discovery,
   connection summaries, tenant visibility, creator attribution, and rejected
-  writes without persisted mutations. `it_mcp_deployed_test.go` runs in the
+  writes without persisted mutations. `it_mcp_discovery_test.go` creates
+  Projects and Secret references for two tenants, verifies caller-scoped
+  Project and Secret-reference listing, confirms Secret-reference results
+  contain only reference metadata, and checks list-only Secret Get rejection
+  through the shared safe-error contract. `it_mcp_deployed_test.go` runs in the
   Fulfillment Kind CI job with `MCP_TEST_ENABLED=true` and real Keycloak; it
   checks TLS metadata and valid calls, plus rejection of the Fulfillment API
   audience, a wrong issuer, an expired token, and a wrong resource. It also
