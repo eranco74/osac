@@ -199,8 +199,10 @@ Touched-area requirements: [component guide](../fulfillment-service/AGENTS.md#in
 - **MCP server:** `fulfillment-service/it/it_mcp_server_test.go` uses a real MCP
   SDK client and an in-process MCP handler; its exchanger forwards a caller API
   token to deployed Fulfillment and PostgreSQL. It covers five-tool discovery,
-  connection summaries, tenant visibility, creator attribution, and rejected
-  writes without persisted mutations. `it_mcp_discovery_test.go` creates
+  connection summaries, tenant visibility, creator attribution, asynchronous
+  create acceptance with the resource ID and version, rejected arbitrary
+  service/method/payload arguments, and rejected writes without persisted
+  mutations. `it_mcp_discovery_test.go` creates
   Projects and Secret references for two tenants, verifies caller-scoped
   Project and Secret-reference listing, confirms Secret-reference results
   contain only reference metadata, and checks list-only Secret Get rejection
@@ -213,8 +215,9 @@ Touched-area requirements: [component guide](../fulfillment-service/AGENTS.md#in
   settings and replica counts. `internal/auth/auth_jwt_validator_test.go`
   covers expired and untrusted-issuer tokens; MCP ingress tests cover wrong
   resource audiences. `mcpserver` unit tests cover 4xx/429/5xx and transport
-  exchange failures, caller/permission mismatch, safe errors, and connection
-  checks. Helm lint and rendering cover opt-in templates and schema; ordinary
+  exchange failures, typed registration, caller/permission mismatch, safe
+  errors, and connection checks. Helm lint and rendering cover opt-in templates
+  and schema; ordinary
   profile renders exercise the disabled default. Provider provisioning, VM
   readiness, and external MCP-host interoperability remain outside these tests.
 - **ExternalIP allocation capacity ([DEV] OSAC-6307):** `internal/servers/private_external_ips_server_test.go` verifies capacity remains held while the ExternalIP has a finalizer and returns after archive. Migration 125 backfills pending deletions and checks exactly-once release in PostgreSQL. Application and database checks keep terminating consumers exclusive until archive. Provider cleanup is covered by operator tests with fixtures.
