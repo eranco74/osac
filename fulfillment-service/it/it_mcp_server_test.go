@@ -594,6 +594,58 @@ var _ = Describe("MCP server", func() {
 			g.Expect(updated.Version).To(BeNumerically(">", retryVersion))
 		}, time.Minute, 100*time.Millisecond).Should(Succeed())
 
+		powerStopped, err := callMCPTool[mcpserver.SetComputeInstancePowerOutput](
+			ctx, session, "set_compute_instance_power", mcpserver.SetComputeInstancePowerInput{
+				ID: computeInstanceID, Version: updated.Version, Action: "stop",
+			},
+		)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(powerStopped.ID).To(Equal(computeInstanceID))
+		Expect(powerStopped.RunStrategy).To(Equal("HALTED"))
+		stoppedResponse, err := computeInstancesClient.Get(ctx, publicv1.ComputeInstancesGetRequest_builder{
+			Id: computeInstanceID,
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(stoppedResponse.GetObject().GetSpec().GetRunStrategy()).To(Equal(
+			publicv1.ComputeInstanceRunStrategy_COMPUTE_INSTANCE_RUN_STRATEGY_HALTED,
+		))
+
+		powerStarted, err := callMCPTool[mcpserver.SetComputeInstancePowerOutput](
+			ctx, session, "set_compute_instance_power", mcpserver.SetComputeInstancePowerInput{
+				ID: computeInstanceID, Version: stoppedResponse.GetObject().GetMetadata().GetVersion(), Action: "start",
+			},
+		)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(powerStarted.ID).To(Equal(computeInstanceID))
+		Expect(powerStarted.RunStrategy).To(Equal("ALWAYS"))
+		startedResponse, err := computeInstancesClient.Get(ctx, publicv1.ComputeInstancesGetRequest_builder{
+			Id: computeInstanceID,
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(startedResponse.GetObject().GetSpec().GetRunStrategy()).To(Equal(
+			publicv1.ComputeInstanceRunStrategy_COMPUTE_INSTANCE_RUN_STRATEGY_ALWAYS,
+		))
+
+		restarted, err := callMCPTool[mcpserver.RestartComputeInstanceOutput](
+			ctx, session, "restart_compute_instance", mcpserver.RestartComputeInstanceInput{
+				ID: computeInstanceID, Version: startedResponse.GetObject().GetMetadata().GetVersion(),
+			},
+		)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(restarted.ID).To(Equal(computeInstanceID))
+		Expect(restarted.RestartRequestedAt).ToNot(BeEmpty())
+		restartedAt, err := time.Parse(time.RFC3339Nano, restarted.RestartRequestedAt)
+		Expect(err).ToNot(HaveOccurred())
+		restartedResponse, err := computeInstancesClient.Get(ctx, publicv1.ComputeInstancesGetRequest_builder{
+			Id: computeInstanceID,
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(restartedResponse.GetObject().GetSpec().GetRestartRequestedAt()).ToNot(BeNil())
+		Expect(restartedResponse.GetObject().GetSpec().GetRestartRequestedAt().AsTime()).To(
+			BeTemporally("~", restartedAt, time.Second),
+		)
+		currentVersionAfterRestart := restartedResponse.GetObject().GetMetadata().GetVersion()
+
 		otherNetwork := createCatalogItemNetworkInClassFixture(ctx, "development", "", networkClassID)
 		otherTokenSource, err := tool.makeKeycloakTokenSource(ctx, "ben", usersPassword)
 		Expect(err).ToNot(HaveOccurred())
@@ -641,6 +693,28 @@ var _ = Describe("MCP server", func() {
 		})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(hiddenList.Items).To(BeEmpty())
+
+		_, err = callMCPTool[mcpserver.SetComputeInstancePowerOutput](
+			ctx, otherSession, "set_compute_instance_power", mcpserver.SetComputeInstancePowerInput{
+				ID: computeInstanceID, Version: currentVersionAfterRestart, Action: "stop",
+			},
+		)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(`"grpc_code":"NotFound"`))
+		_, err = callMCPTool[mcpserver.RestartComputeInstanceOutput](
+			ctx, otherSession, "restart_compute_instance", mcpserver.RestartComputeInstanceInput{
+				ID: computeInstanceID, Version: currentVersionAfterRestart,
+			},
+		)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(`"grpc_code":"NotFound"`))
+		isolatedResponse, err := computeInstancesClient.Get(ctx, publicv1.ComputeInstancesGetRequest_builder{
+			Id: computeInstanceID,
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(isolatedResponse.GetObject().GetSpec().GetRunStrategy()).To(Equal(
+			publicv1.ComputeInstanceRunStrategy_COMPUTE_INSTANCE_RUN_STRATEGY_ALWAYS,
+		))
 
 		_, err = callMCPTool[mcpserver.DeleteComputeInstanceOutput](
 			ctx, otherSession, "delete_compute_instance", mcpserver.DeleteComputeInstanceInput{ID: computeInstanceID},
