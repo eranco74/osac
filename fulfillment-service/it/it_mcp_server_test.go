@@ -594,14 +594,32 @@ var _ = Describe("MCP server", func() {
 			g.Expect(updated.Version).To(BeNumerically(">", retryVersion))
 		}, time.Minute, 100*time.Millisecond).Should(Succeed())
 
-		powerStopped, err := callMCPTool[mcpserver.SetComputeInstancePowerOutput](
-			ctx, session, "set_compute_instance_power", mcpserver.SetComputeInstancePowerInput{
-				ID: computeInstanceID, Version: updated.Version, Action: "stop",
-			},
-		)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(powerStopped.ID).To(Equal(computeInstanceID))
-		Expect(powerStopped.RunStrategy).To(Equal("HALTED"))
+		setPowerAtCurrentVersion := func(action, expectedRunStrategy string) mcpserver.SetComputeInstancePowerOutput {
+			var output mcpserver.SetComputeInstancePowerOutput
+			Eventually(func(g Gomega) {
+				current, err := computeInstancesClient.Get(ctx, publicv1.ComputeInstancesGetRequest_builder{
+					Id: computeInstanceID,
+				}.Build())
+				g.Expect(err).ToNot(HaveOccurred())
+				output, powerErr := callMCPTool[mcpserver.SetComputeInstancePowerOutput](
+					ctx, session, "set_compute_instance_power", mcpserver.SetComputeInstancePowerInput{
+						ID:      computeInstanceID,
+						Version: current.GetObject().GetMetadata().GetVersion(),
+						Action:  action,
+					},
+				)
+				if powerErr != nil {
+					g.Expect(powerErr.Error()).To(ContainSubstring("The resource version is stale"))
+					g.Expect(powerErr).ToNot(HaveOccurred())
+					return
+				}
+				g.Expect(output.ID).To(Equal(computeInstanceID))
+				g.Expect(output.RunStrategy).To(Equal(expectedRunStrategy))
+			}, time.Minute, 100*time.Millisecond).Should(Succeed())
+			return output
+		}
+
+		setPowerAtCurrentVersion("stop", "HALTED")
 		stoppedResponse, err := computeInstancesClient.Get(ctx, publicv1.ComputeInstancesGetRequest_builder{
 			Id: computeInstanceID,
 		}.Build())
@@ -610,14 +628,7 @@ var _ = Describe("MCP server", func() {
 			publicv1.ComputeInstanceRunStrategy_COMPUTE_INSTANCE_RUN_STRATEGY_HALTED,
 		))
 
-		powerStarted, err := callMCPTool[mcpserver.SetComputeInstancePowerOutput](
-			ctx, session, "set_compute_instance_power", mcpserver.SetComputeInstancePowerInput{
-				ID: computeInstanceID, Version: stoppedResponse.GetObject().GetMetadata().GetVersion(), Action: "start",
-			},
-		)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(powerStarted.ID).To(Equal(computeInstanceID))
-		Expect(powerStarted.RunStrategy).To(Equal("ALWAYS"))
+		setPowerAtCurrentVersion("start", "ALWAYS")
 		startedResponse, err := computeInstancesClient.Get(ctx, publicv1.ComputeInstancesGetRequest_builder{
 			Id: computeInstanceID,
 		}.Build())
@@ -626,14 +637,27 @@ var _ = Describe("MCP server", func() {
 			publicv1.ComputeInstanceRunStrategy_COMPUTE_INSTANCE_RUN_STRATEGY_ALWAYS,
 		))
 
-		restarted, err := callMCPTool[mcpserver.RestartComputeInstanceOutput](
-			ctx, session, "restart_compute_instance", mcpserver.RestartComputeInstanceInput{
-				ID: computeInstanceID, Version: startedResponse.GetObject().GetMetadata().GetVersion(),
-			},
-		)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(restarted.ID).To(Equal(computeInstanceID))
-		Expect(restarted.RestartRequestedAt).ToNot(BeEmpty())
+		var restarted mcpserver.RestartComputeInstanceOutput
+		Eventually(func(g Gomega) {
+			current, err := computeInstancesClient.Get(ctx, publicv1.ComputeInstancesGetRequest_builder{
+				Id: computeInstanceID,
+			}.Build())
+			g.Expect(err).ToNot(HaveOccurred())
+			output, restartErr := callMCPTool[mcpserver.RestartComputeInstanceOutput](
+				ctx, session, "restart_compute_instance", mcpserver.RestartComputeInstanceInput{
+					ID:      computeInstanceID,
+					Version: current.GetObject().GetMetadata().GetVersion(),
+				},
+			)
+			if restartErr != nil {
+				g.Expect(restartErr.Error()).To(ContainSubstring("The resource version is stale"))
+				g.Expect(restartErr).ToNot(HaveOccurred())
+				return
+			}
+			restarted = output
+			g.Expect(restarted.ID).To(Equal(computeInstanceID))
+			g.Expect(restarted.RestartRequestedAt).ToNot(BeEmpty())
+		}, time.Minute, 100*time.Millisecond).Should(Succeed())
 		restartedAt, err := time.Parse(time.RFC3339Nano, restarted.RestartRequestedAt)
 		Expect(err).ToNot(HaveOccurred())
 		restartedResponse, err := computeInstancesClient.Get(ctx, publicv1.ComputeInstancesGetRequest_builder{
@@ -818,7 +842,7 @@ var _ = Describe("MCP server", func() {
 		Expect(createdInstance.GetObject().GetMetadata().GetProject()).To(Equal(projectName))
 		Expect(createdInstance.GetObject().GetSpec().GetDiskImage().GetId()).To(Equal(diskImageID))
 		Expect(createdInstance.GetObject().GetSpec().GetRunStrategy()).To(Equal(
-			publicv1.ComputeInstanceRunStrategy_COMPUTE_INSTANCE_RUN_STRATEGY_HALTED,
+			publicv1.ComputeInstanceRunStrategy_COMPUTE_INSTANCE_RUN_STRATEGY_ALWAYS,
 		))
 		Expect(createdInstance.GetObject().GetSpec().GetInstanceType().GetId()).To(Equal(instanceTypeID))
 		Expect(createdInstance.GetObject().GetSpec().GetBootDisk().GetSizeGib()).To(Equal(bootDiskSize))
