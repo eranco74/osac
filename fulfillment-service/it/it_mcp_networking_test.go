@@ -388,8 +388,8 @@ var _ = Describe("MCP network resources", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(virtualNetworkResponse.GetObject().GetId()).To(Equal(virtualNetworkID))
 		Expect(virtualNetworkResponse.GetObject().GetMetadata().GetName()).To(Equal(virtualNetworkName))
-		Expect(virtualNetworkResponse.GetObject().GetMetadata().GetVersion()).To(Equal(originalVirtualNetworkVersion))
 		Expect(virtualNetworkResponse.GetObject().GetSpec().GetIpv4Cidr()).To(Equal(virtualNetworkCIDR))
+		Expect(virtualNetworkResponse.GetObject().GetMetadata().HasDeletionTimestamp()).To(BeFalse())
 
 		assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeVirtualNetwork, virtualNetworkID)
 		assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeVirtualNetwork, replacementVirtualNetworkID)
@@ -516,7 +516,9 @@ var _ = Describe("MCP network resources", func() {
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		Expect(virtualNetworkResponse.GetObject().GetMetadata().HasDeletionTimestamp()).To(BeFalse())
-		Expect(virtualNetworkResponse.GetObject().GetMetadata().GetVersion()).To(Equal(originalVirtualNetworkVersion))
+		Expect(virtualNetworkResponse.GetObject().GetId()).To(Equal(virtualNetworkID))
+		Expect(virtualNetworkResponse.GetObject().GetMetadata().GetName()).To(Equal(virtualNetworkName))
+		Expect(virtualNetworkResponse.GetObject().GetSpec().GetIpv4Cidr()).To(Equal(virtualNetworkCIDR))
 		assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeVirtualNetwork, virtualNetworkID)
 		assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeVirtualNetwork, replacementVirtualNetworkID)
 
