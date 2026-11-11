@@ -480,9 +480,28 @@ var _ = Describe("MCP server", func() {
 		Expect(projectList.Items).To(HaveLen(1))
 		Expect(projectList.Items[0].ID).To(Equal(projectID))
 		storageTierResource := assertDiscoverable(mcpserver.ResourceTypeStorageTier, storageTierID)
-		assertDiscoverable(mcpserver.ResourceTypeVirtualNetwork, virtualNetworkID)
+		originalVirtualNetwork := assertDiscoverable(mcpserver.ResourceTypeVirtualNetwork, virtualNetworkID)
 		subnet := assertDiscoverable(mcpserver.ResourceTypeSubnet, subnetID)
 		securityGroup := assertDiscoverable(mcpserver.ResourceTypeSecurityGroup, securityGroupID)
+
+		replacementNetwork, err := callMCPTool[mcpserver.CreateNetworkResourceOutput](
+			ctx, session, "create_network_resource", mcpserver.CreateNetworkResourceInput{
+				ResourceType: mcpserver.NetworkResourceTypeVirtualNetwork,
+				Name:         fmt.Sprintf("mcp-vn-replacement-%s", uuid.New()[24:32]),
+				IPv4Cidr:     "10.201.0.0/16",
+			},
+		)
+		Expect(err).ToNot(HaveOccurred())
+		replacementVirtualNetworkID := replacementNetwork.ID
+		DeferCleanup(func(cleanupCtx context.Context) {
+			if replacementVirtualNetworkID != "" {
+				Expect(cleanupVirtualNetworkFixture(
+					cleanupCtx, virtualNetworksClient, replacementVirtualNetworkID,
+				)).To(Succeed())
+			}
+		})
+		Expect(replacementVirtualNetworkID).ToNot(BeEmpty())
+		Expect(replacementVirtualNetworkID).ToNot(Equal(virtualNetworkID))
 
 		catalogItemResourceID, ok := catalogItem["id"].(string)
 		Expect(ok).To(BeTrue())
@@ -578,6 +597,10 @@ var _ = Describe("MCP server", func() {
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring(`"category":"conflict"`))
 		Expect(err.Error()).To(ContainSubstring(`"grpc_code":"Aborted"`))
+		By("keeping both network identities discoverable after the stale version conflict")
+		originalAfterConflict := assertDiscoverable(mcpserver.ResourceTypeVirtualNetwork, virtualNetworkID)
+		Expect(originalAfterConflict["version"]).To(Equal(originalVirtualNetwork["version"]))
+		assertDiscoverable(mcpserver.ResourceTypeVirtualNetwork, replacementVirtualNetworkID)
 
 		var updated mcpserver.UpdateComputeInstanceOutput
 		Eventually(func(g Gomega) {
