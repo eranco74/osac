@@ -61,6 +61,42 @@ func mcpToolNames(tools []*mcp.Tool) []string {
 	return names
 }
 
+func assertMCPResourceDiscoverable(
+	ctx context.Context, session *mcp.ClientSession, resourceType mcpserver.ResourceType, id string,
+) map[string]any {
+	GinkgoHelper()
+	listOutput, err := callMCPTool[mcpserver.ListResourcesOutput](
+		ctx, session, "list_resources", mcpserver.ListResourcesInput{
+			ResourceType: resourceType,
+			Filter:       fmt.Sprintf("this.id == %q", id),
+		},
+	)
+	ExpectWithOffset(1, err).ToNot(HaveOccurred())
+	ExpectWithOffset(1, listOutput.Items).To(HaveLen(1))
+	ExpectWithOffset(1, listOutput.Items[0].ID).To(Equal(id))
+
+	resource, err := callMCPTool[mcpserver.GetResourceOutput](
+		ctx, session, "get_resource", mcpserver.GetResourceInput{
+			ResourceType: resourceType,
+			ID:           id,
+		},
+	)
+	ExpectWithOffset(1, err).ToNot(HaveOccurred())
+	ExpectWithOffset(1, resource.Resource).To(HaveKeyWithValue("id", id))
+	ExpectWithOffset(1, resource.Resource).To(HaveKey("name"))
+	ExpectWithOffset(1, resource.Resource).To(HaveKey("version"))
+	ExpectWithOffset(1, resource.Resource).ToNot(HaveKey("title"))
+	ExpectWithOffset(1, resource.Resource).ToNot(HaveKey("description"))
+	ExpectWithOffset(1, resource.Resource).ToNot(HaveKey("annotations"))
+	ExpectWithOffset(1, resource.Resource).ToNot(HaveKey("status"))
+	ExpectWithOffset(1, resource.Resource).ToNot(HaveKey("conditions"))
+	ExpectWithOffset(1, resource.Resource).ToNot(HaveKey("specDefaults"))
+	ExpectWithOffset(1, resource.Resource).ToNot(HaveKey("spec"))
+	ExpectWithOffset(1, resource.Resource).ToNot(HaveKey("fields"))
+	ExpectWithOffset(1, resource.Resource).ToNot(HaveKey("userData"))
+	return resource.Resource
+}
+
 func startInProcessMCPServer(ctx context.Context, userAgent string) *httptest.Server {
 	jwksCache, err := auth.NewJwksCache().
 		SetLogger(logger).

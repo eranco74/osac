@@ -391,28 +391,8 @@ var _ = Describe("MCP network resources", func() {
 		Expect(virtualNetworkResponse.GetObject().GetMetadata().GetVersion()).To(Equal(originalVirtualNetworkVersion))
 		Expect(virtualNetworkResponse.GetObject().GetSpec().GetIpv4Cidr()).To(Equal(virtualNetworkCIDR))
 
-		assertNetworkDiscoverable := func(id string) {
-			listed, listErr := callMCPTool[mcpserver.ListResourcesOutput](
-				ctx, session, "list_resources", mcpserver.ListResourcesInput{
-					ResourceType: mcpserver.ResourceTypeVirtualNetwork,
-					Filter:       fmt.Sprintf("this.id == %q", id),
-				},
-			)
-			Expect(listErr).ToNot(HaveOccurred())
-			Expect(listed.Items).To(HaveLen(1))
-			Expect(listed.Items[0].ID).To(Equal(id))
-
-			got, getErr := callMCPTool[mcpserver.GetResourceOutput](
-				ctx, session, "get_resource", mcpserver.GetResourceInput{
-					ResourceType: mcpserver.ResourceTypeVirtualNetwork,
-					ID:           id,
-				},
-			)
-			Expect(getErr).ToNot(HaveOccurred())
-			Expect(got.Resource).To(HaveKeyWithValue("id", id))
-		}
-		assertNetworkDiscoverable(virtualNetworkID)
-		assertNetworkDiscoverable(replacementVirtualNetworkID)
+		assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeVirtualNetwork, virtualNetworkID)
+		assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeVirtualNetwork, replacementVirtualNetworkID)
 
 		invalidName := ndUniqueName("mcp-vn-ipv6")
 		_, err = callMCPTool[mcpserver.CreateNetworkResourceOutput](
@@ -537,8 +517,8 @@ var _ = Describe("MCP network resources", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(virtualNetworkResponse.GetObject().GetMetadata().HasDeletionTimestamp()).To(BeFalse())
 		Expect(virtualNetworkResponse.GetObject().GetMetadata().GetVersion()).To(Equal(originalVirtualNetworkVersion))
-		assertNetworkDiscoverable(virtualNetworkID)
-		assertNetworkDiscoverable(replacementVirtualNetworkID)
+		assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeVirtualNetwork, virtualNetworkID)
+		assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeVirtualNetwork, replacementVirtualNetworkID)
 
 		deletedSecurityGroup, err := callMCPTool[mcpserver.DeleteNetworkResourceOutput](
 			ctx, session, "delete_network_resource", mcpserver.DeleteNetworkResourceInput{

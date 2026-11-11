@@ -439,39 +439,12 @@ var _ = Describe("MCP server", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(instancesAfter.GetTotal()).To(Equal(instancesBefore.GetTotal()))
 
-		assertDiscoverable := func(resourceType mcpserver.ResourceType, id string) map[string]any {
-			listOutput, err := callMCPTool[mcpserver.ListResourcesOutput](ctx, session, "list_resources", mcpserver.ListResourcesInput{
-				ResourceType: resourceType,
-				Filter:       fmt.Sprintf("this.id == %q", id),
-			})
-			Expect(err).ToNot(HaveOccurred())
-			Expect(listOutput.Items).To(HaveLen(1))
-			Expect(listOutput.Items[0].ID).To(Equal(id))
-
-			resource, err := callMCPTool[mcpserver.GetResourceOutput](ctx, session, "get_resource", mcpserver.GetResourceInput{
-				ResourceType: resourceType,
-				ID:           id,
-			})
-			Expect(err).ToNot(HaveOccurred())
-			Expect(resource.Resource).To(HaveKeyWithValue("id", id))
-			Expect(resource.Resource).To(HaveKey("name"))
-			Expect(resource.Resource).To(HaveKey("version"))
-			Expect(resource.Resource).ToNot(HaveKey("title"))
-			Expect(resource.Resource).ToNot(HaveKey("description"))
-			Expect(resource.Resource).ToNot(HaveKey("annotations"))
-			Expect(resource.Resource).ToNot(HaveKey("status"))
-			Expect(resource.Resource).ToNot(HaveKey("conditions"))
-			Expect(resource.Resource).ToNot(HaveKey("specDefaults"))
-			Expect(resource.Resource).ToNot(HaveKey("spec"))
-			Expect(resource.Resource).ToNot(HaveKey("fields"))
-			Expect(resource.Resource).ToNot(HaveKey("userData"))
-			return resource.Resource
-		}
-
-		catalogItem := assertDiscoverable(mcpserver.ResourceTypeComputeInstanceCatalogItem, catalogItemID)
-		assertDiscoverable(mcpserver.ResourceTypeComputeInstanceTemplate, templateID)
-		instanceType := assertDiscoverable(mcpserver.ResourceTypeInstanceType, instanceTypeID)
-		assertDiscoverable(mcpserver.ResourceTypeDiskImage, diskImageID)
+		catalogItem := assertMCPResourceDiscoverable(
+			ctx, session, mcpserver.ResourceTypeComputeInstanceCatalogItem, catalogItemID,
+		)
+		assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeComputeInstanceTemplate, templateID)
+		instanceType := assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeInstanceType, instanceTypeID)
+		assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeDiskImage, diskImageID)
 		projectList, err := callMCPTool[mcpserver.ListResourcesOutput](ctx, session, "list_resources", mcpserver.ListResourcesInput{
 			ResourceType: mcpserver.ResourceTypeProject,
 			Filter:       fmt.Sprintf("this.id == %q", projectID),
@@ -479,10 +452,10 @@ var _ = Describe("MCP server", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(projectList.Items).To(HaveLen(1))
 		Expect(projectList.Items[0].ID).To(Equal(projectID))
-		storageTierResource := assertDiscoverable(mcpserver.ResourceTypeStorageTier, storageTierID)
-		originalVirtualNetwork := assertDiscoverable(mcpserver.ResourceTypeVirtualNetwork, virtualNetworkID)
-		subnet := assertDiscoverable(mcpserver.ResourceTypeSubnet, subnetID)
-		securityGroup := assertDiscoverable(mcpserver.ResourceTypeSecurityGroup, securityGroupID)
+		storageTierResource := assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeStorageTier, storageTierID)
+		originalVirtualNetwork := assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeVirtualNetwork, virtualNetworkID)
+		subnet := assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeSubnet, subnetID)
+		securityGroup := assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeSecurityGroup, securityGroupID)
 
 		replacementNetwork, err := callMCPTool[mcpserver.CreateNetworkResourceOutput](
 			ctx, session, "create_network_resource", mcpserver.CreateNetworkResourceInput{
@@ -598,9 +571,11 @@ var _ = Describe("MCP server", func() {
 		Expect(err.Error()).To(ContainSubstring(`"category":"conflict"`))
 		Expect(err.Error()).To(ContainSubstring(`"grpc_code":"Aborted"`))
 		By("keeping both network identities discoverable after the stale version conflict")
-		originalAfterConflict := assertDiscoverable(mcpserver.ResourceTypeVirtualNetwork, virtualNetworkID)
+		originalAfterConflict := assertMCPResourceDiscoverable(
+			ctx, session, mcpserver.ResourceTypeVirtualNetwork, virtualNetworkID,
+		)
 		Expect(originalAfterConflict["version"]).To(Equal(originalVirtualNetwork["version"]))
-		assertDiscoverable(mcpserver.ResourceTypeVirtualNetwork, replacementVirtualNetworkID)
+		assertMCPResourceDiscoverable(ctx, session, mcpserver.ResourceTypeVirtualNetwork, replacementVirtualNetworkID)
 
 		var updated mcpserver.UpdateComputeInstanceOutput
 		Eventually(func(g Gomega) {
