@@ -51,6 +51,30 @@ identity E2E is [OSAC-6614](https://redhat.atlassian.net/browse/OSAC-6614).
   Fulfillment and PostgreSQL; the network provider is omitted, so that
   coverage does not imply a provisioned VM or provider execution. Read the
   fixtures before extending those cases.
+- **MCP network replacement ([OSAC-5855](https://redhat.atlassian.net/browse/OSAC-5855), DEV):**
+  the `mcpserver` unit suite checks that edit-shaped VirtualNetwork, Subnet,
+  and SecurityGroup requests return `unsupported_in_place` with the relevant
+  immutable fields and delete dependencies, without calling public Create,
+  Update, or Delete RPCs. The deployed MCP cases
+  `creates and deletes tenant network prerequisites through the public API`
+  and `drives ComputeInstance discovery, creation, inspection, and deletion
+  over real HTTP with bearer token forwarding` verify replacement identity,
+  preservation after a dependency-conflicted network delete, and list/Get
+  discoverability. The ComputeInstance case also verifies both networks remain
+  discoverable after a stale-version ComputeInstance update conflict. Run
+  them against an already deployed compatible Kind cluster from
+  `fulfillment-service/` with:
+
+  ```bash
+  ginkgo run --timeout 10m \
+    --focus='creates and deletes tenant network prerequisites through the public API|drives ComputeInstance discovery, creation, inspection, and deletion over real HTTP with bearer token forwarding' \
+    it
+  ```
+
+  These cases use deployed Fulfillment, PostgreSQL, Keycloak, the caller token,
+  and the real MCP SDK; the provider and host write-approval UI are omitted.
+  Provider-backed replacement and cleanup remain QE coverage under
+  [OSAC-5856](https://redhat.atlassian.net/browse/OSAC-5856).
 - FabricDomain setup and focused execution are documented in
   [the suite README](../../fulfillment-service/it/README.fabric-domain.md).
 - Deployed service-account journeys, secret rotation included, are the
