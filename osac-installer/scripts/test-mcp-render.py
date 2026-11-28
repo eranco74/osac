@@ -234,6 +234,10 @@ def check_schema() -> None:
         "additional properties 'mcp' not allowed",
     )
     check_rejected(
+        ["--set-string", "global.mcp.exchangeClientID=https://wrong.example.com/"],
+        "global.mcp.exchangeClientID must equal global.mcp.publicURL when global.mcp.enabled=true",
+    )
+    check_rejected(
         ["--set", "global.mcp.limits.requestSize=not-a-quantity"],
         "global/mcp/limits/requestSize",
     )

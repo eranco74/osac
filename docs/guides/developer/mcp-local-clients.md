@@ -43,7 +43,8 @@ the MCP deployment. If you enabled MCP on a cluster installed before this
 token-exchange setup, rerun the infrastructure step before `install-osac`:
 
 ```bash
-make -C osac-installer install-infra PLATFORM=kind PROFILE="$PROFILE" NS=osac
+make -C osac-installer install-infra PLATFORM=kind PROFILE=dev-full NS=osac \
+  INFRA_VALUES_EXTRA='--values values/dev/kind-infra-devfull.yaml --values values/dev/mcp.yaml'
 ```
 
 The MCP client's access token is scoped to the MCP URL; the server exchanges
@@ -75,9 +76,14 @@ make -C osac-installer install-osac \
   EXTRA_HELM_ARGS="--values values/dev/mcp.yaml --set-string global.mcp.issuerURL=https://keycloak.osac.localhost:8443/realms/osac --set-string global.mcp.exchangeTokenEndpoint=https://keycloak.osac.localhost:8443/realms/osac/protocol/openid-connect/token --set-string service.images.service.repository=localhost/fulfillment-service --set-string service.images.service.tag=$FULFILLMENT_IMAGE_TAG --set service.images.service.pullPolicy=Never"
 ```
 
-On a fresh cluster, run
-`make -C osac-installer install-infra PLATFORM=kind PROFILE=dev-full NS=osac`
-before `image-build`, and run
+On a fresh cluster, run:
+
+```bash
+make -C osac-installer install-infra PLATFORM=kind PROFILE=dev-full NS=osac \
+  INFRA_VALUES_EXTRA='--values values/dev/kind-infra-devfull.yaml --values values/dev/mcp.yaml'
+```
+
+Run this before `image-build`, and run
 `make -C osac-installer install-devstack PLATFORM=kind PROFILE=dev-full NS=osac`
 after `install-osac`.
 In a new worktree, first run

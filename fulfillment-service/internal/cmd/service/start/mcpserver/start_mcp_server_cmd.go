@@ -1108,14 +1108,17 @@ func newRuntimeLimitsMiddleware(maxConcurrency int, timeout time.Duration) func(
 				return
 			}
 			responseController := http.NewResponseController(writer)
-			if err := responseController.SetReadDeadline(time.Now().Add(timeout)); err != nil &&
+			deadline := time.Now().Add(timeout)
+			if err := responseController.SetReadDeadline(deadline); err != nil &&
 				!errors.Is(err, http.ErrNotSupported) {
 				http.Error(writer, "MCP server cannot set a request deadline", http.StatusInternalServerError)
 				return
 			}
-			defer func() {
-				_ = responseController.SetReadDeadline(time.Time{})
-			}()
+			if err := responseController.SetWriteDeadline(deadline); err != nil &&
+				!errors.Is(err, http.ErrNotSupported) {
+				http.Error(writer, "MCP server cannot set a response deadline", http.StatusInternalServerError)
+				return
+			}
 			ctx, cancel := context.WithTimeout(request.Context(), timeout)
 			defer cancel()
 			next.ServeHTTP(writer, request.WithContext(ctx))

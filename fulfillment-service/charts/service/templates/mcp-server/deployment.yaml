@@ -18,6 +18,9 @@ specific language governing permissions and limitations under the License.
 {{- $audience := required "global.mcp.audience is required when global.mcp.enabled=true" $mcp.audience }}
 {{- $exchangeTokenEndpoint := tpl (required "global.mcp.exchangeTokenEndpoint is required when global.mcp.enabled=true" $mcp.exchangeTokenEndpoint) . }}
 {{- $exchangeClientID := required "global.mcp.exchangeClientID is required when global.mcp.enabled=true" $mcp.exchangeClientID }}
+{{- if ne $exchangeClientID $publicURL }}
+{{- fail "global.mcp.exchangeClientID must equal global.mcp.publicURL when global.mcp.enabled=true" }}
+{{- end }}
 {{- $exchangeSecretName := required "global.mcp.exchangeClientSecret.name is required when global.mcp.enabled=true" $mcp.exchangeClientSecret.name }}
 {{- $exchangeSecretKey := required "global.mcp.exchangeClientSecret.key is required when global.mcp.enabled=true" $mcp.exchangeClientSecret.key }}
 {{- $trustMode := $mcp.trust.mode }}

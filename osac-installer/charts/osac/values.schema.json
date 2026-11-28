@@ -180,7 +180,7 @@
             },
             "exchangeClientID": {
               "type": "string",
-              "description": "Confidential OAuth client ID used for per-caller token exchange",
+              "description": "Confidential OAuth client ID used for per-caller token exchange; must equal global.mcp.publicURL",
               "default": "",
               "maxLength": 256
             },

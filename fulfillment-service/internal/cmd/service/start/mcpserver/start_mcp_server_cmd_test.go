@@ -14,6 +14,7 @@ language governing permissions and limitations under the License.
 package mcpserver
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"time"
 
 	sdkauth "github.com/modelcontextprotocol/go-sdk/auth"
@@ -164,11 +166,13 @@ var _ = Describe("runtime limits", func() {
 
 	It("interrupts an incomplete request body over a real connection", func() {
 		completed := make(chan struct{})
+		copyErrors := make(chan error, 1)
 		handler := newRuntimeLimitsMiddleware(1, 20*time.Millisecond)(http.HandlerFunc(func(
 			writer http.ResponseWriter, request *http.Request,
 		) {
 			defer close(completed)
-			_, _ = io.Copy(io.Discard, request.Body)
+			_, err := io.Copy(io.Discard, request.Body)
+			copyErrors <- err
 		}))
 		server := httptest.NewServer(handler)
 		DeferCleanup(server.Close)
@@ -180,6 +184,42 @@ var _ = Describe("runtime limits", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		Eventually(completed).Should(BeClosed())
+		var copyErr error
+		Eventually(copyErrors).Should(Receive(&copyErr))
+		Expect(copyErr).To(MatchError(os.ErrDeadlineExceeded))
+	})
+
+	It("closes after an early rejection leaves an unread body", func() {
+		handler := newRuntimeLimitsMiddleware(1, time.Second)(http.HandlerFunc(func(
+			writer http.ResponseWriter, request *http.Request,
+		) {
+			writer.WriteHeader(http.StatusUnauthorized)
+			writer.(http.Flusher).Flush()
+		}))
+		server := httptest.NewServer(handler)
+		DeferCleanup(server.Close)
+
+		connection, err := net.Dial("tcp", server.Listener.Addr().String())
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(connection.Close)
+		_, err = connection.Write([]byte("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nshort"))
+		Expect(err).ToNot(HaveOccurred())
+		if tcpConnection, ok := connection.(*net.TCPConn); ok {
+			Expect(tcpConnection.CloseWrite()).To(Succeed())
+		}
+
+		request, err := http.NewRequest(http.MethodPost, server.URL, nil)
+		Expect(err).ToNot(HaveOccurred())
+		response, err := http.ReadResponse(bufio.NewReader(connection), request)
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(func() { _ = response.Body.Close() })
+		Expect(response.StatusCode).To(Equal(http.StatusUnauthorized))
+
+		Eventually(func() error {
+			Expect(connection.SetReadDeadline(time.Now().Add(2 * time.Second))).To(Succeed())
+			_, err := connection.Read(make([]byte, 1))
+			return err
+		}).Should(MatchError(io.EOF))
 	})
 
 	It("rejects requests while the concurrency limit is exhausted", func() {
